@@ -1,0 +1,331 @@
+// CPU PIPELINE CONTROLLER
+
+unit cpu(
+    input   uint1               clock_cache,                                                                                    // CLOCKS TO PASS TO CPU
+    input   uint1               clock_decode,
+
+    output  uint$addr_width$    MEM_ADDR_PC,                                                                                    // CPU FETCH <-> MEMORY BUS
+    output  uint1               MEM_REQ_FETCH,
+    input   uint1               MEM_ACK_FETCH,
+    input   uint1               MEM_BUSY_FETCH,
+    input   uint32              MEM_INSTRUCTION,
+
+    output  uint$addr_width$    MEM_ADDR_LOAD,                                                                                  // CPU LOAD <-> MEMORY BUS
+    output  uint1               MEM_REQ_LOAD,
+    input   uint1               MEM_ACK_LOAD,
+    output  uint2               MEM_SIZE_LOAD,
+    input   uint1               MEM_BUSY_LOAD,
+    input   uint64              MEM_RDATA,
+
+    output  uint$addr_width$    MEM_ADDR_STORE,
+    output  uint1               MEM_REQ_STORE,                                                                                  // CPU STORE <-> MEMORY BUS
+    input   uint1               MEM_ACK_STORE,
+    output  uint2               MEM_SIZE_STORE,
+    input   uint1               MEM_BUSY_STORE,
+    output  uint64              MEM_WDATA,
+
+    input   uint1               DMA_ACTIVE,                                                                                     // DMA AUDIO/COPY/SET IS ACTIVE
+
+    input   uint$CWIDTH$        RDTIME,                                                                                         // MAIN SYSTEM TICK
+    input   uint$CWIDTH$        IRQ_TIMER,                                                                                      // IRQ TIMER TRIGGER VALUE
+    input   uint1               TIMER_VALID,                                                                                    // HAS IRQ TIMER TRIGGER VALUE BEEN FULLY SET
+    input   uint1               IRQ_VBLANK                                                                                      // IRQ VBLANK
+) <reginputs> {
+    dualport_bram uint$3+BPpartaddresswidth$ BRANCH_PREDICTION <@clock_decode,@clock> [$BPsize$] = uninitialized;               // SMALL ON CPU BRANCH PREDICTION TABLE
+
+    cpu_fetch FETCH(                                                                                                            // STAGE 1 FETCH
+        CPU_FENCE <: AGU.FENCE[0,1],                                                                                            //  FENCE FLAGS ( RESET CACHE AFTER PROGRAM LOAD )
+
+        clock_cache <: clock_cache,                                                                                             //  CPU SUBSYSTEM CLOCKS
+        clock_decode <: clock_decode,
+
+        PRED_TABLE <:> BRANCH_PREDICTION,                                                                                       //  BRANCH PREDICTION TABLE
+        BP_FLUSH <: AGU.BP_FLUSH,                                                                                               //      FLUSH PIPELINE FLAG FROM AGU
+        BP_TAKEN <: AGU.BP_TAKEN,                                                                                               //      BRANCH PREDICTION CORRECT FLAG FROM AGU
+
+        MEM_ADDR_PC :> MEM_ADDR_PC,                                                                                             //  CPU FETCH <-> CPU MEMORY BUS
+        MEM_REQ_FETCH :> MEM_REQ_FETCH,
+        MEM_BUSY_FETCH <: MEM_BUSY_FETCH,
+        MEM_ACK_FETCH <: MEM_ACK_FETCH,
+        MEM_INSTRUCTION <: MEM_INSTRUCTION,
+
+        DECODE_READY <: DECODE.DECODE_READY,                                                                                    //  STAGE 2 READY FLAG
+        JUMP_PC <: AGU.AGU_BRANCH_JUMP, JUMP_READY <: AGU.AGU_DO_BRANCH_JUMP,                                                   //  STAGE 4 JUMP READY AND ADDRESS FLAGS
+
+        CSR_MTVEC <: EXECUTE_CSRFPU.CSR_MTVEC,                                                                                  //  IRQ FLAGS
+        CSR_IRQ_PENDING <: EXECUTE_CSRFPU.CSR_IRQ_PENDING,
+        CSR_IRQ_VECTOR <: EXECUTE_CSRFPU.CSR_IRQ_VECTOR,
+        CSR_IRQ_ACK_ACK <: EXECUTE_CSRFPU.CSR_IRQ_ACK_ACK
+    );
+
+    cpu_decode DECODE(                                                                                                          // STAGE 2 DECODE
+        clock_decode <: clock_decode,
+
+        BP_FLUSH <: AGU.BP_FLUSH,                                                                                               //  FLUSH PIPELINE FLAG FROM AGU
+
+        DECODE_ACK <: FETCH.DECODE_ACK,                                                                                         //  STAGE 1 PIPELINE ACKNOWLEDGE FLAG
+        DECODE_PC <: FETCH.DECODE_PC,                                                                                           //  PC
+        DECODE_PC_INC <: FETCH.DECODE_PC_INC,                                                                                   //  NEXT INSTRUCTION ( no jump/brranch )
+        DECODE_BA <: FETCH.DECODE_BA,                                                                                           //  NEXT INSTRUCTION ( branch )
+        DECODE_INSTRUCTION <: FETCH.DECODE_INSTRUCTION,
+        DECODE_PRED_TABLE <: FETCH.DECODE_PRED_TABLE,
+
+        REGISTERS_READY <: REGISTERS.REGISTERS_READY                                                                            //  STAGE 3 READY FLAG
+    );
+
+    $$for i=1,3 do
+    simple_dualport_bram int64 I$i$ <@clock_decode,@clock> [32] = { 0, pad(uninitialized) };                                    // 32 MAIN INTEGER REGISTERS
+    $$end
+    $$for i=1,3 do
+    simple_dualport_bram uint64 F$i$ <@clock_decode,@clock> [32] = uninitialized;                                               // 32 MAIN FLOAT REGISTERS
+    $$end
+    cpu_registers REGISTERS(                                                                                                    // STAGE 3 REGISTER FETCH ( AND CONTENTION CHECKS )
+        clock_decode <: clock_decode,
+
+        BP_FLUSH <: AGU.BP_FLUSH,                                                                                               //  FLUSH PIPELINE FLAG FROM AGU
+
+        $$for i=1,3 do
+        I$i$ <:> I$i$,                                                                                                          //  CPU INTEGER REGISTERS ( READ )
+        $$end
+
+        REGISTERS_ACK <: DECODE.REGISTERS_ACK,                                                                                  //  STAGE 2 PIPELINE ACKNOWLEDGE FLAG
+        REGISTERS_PC <: DECODE.REGISTERS_PC,                                                                                    //  PC, INSTRUCTION, COMPRESSED FLAG
+        REGISTERS_PC_INC <: DECODE.REGISTERS_PC_INC,
+        REGISTERS_BA <: DECODE.REGISTERS_BA,
+        REGISTERS_INSTRUCTION <: DECODE.REGISTERS_INSTRUCTION,
+        REGISTERS_FLAGS <: DECODE.REGISTERS_FLAGS,
+        REGISTERS_SR_F <: DECODE.REGISTERS_SR_F,                                                                                //                          INTEGER/FLOAT SOURCE FLAGS
+        REGISTERS_SR <: DECODE.REGISTERS_SR,                                                                                    //                          NUMBER OF SOURCE REGISTERS
+        REGISTERS_PRED_TABLE <: DECODE.REGISTERS_PRED_TABLE,
+
+        AGU_READY <: AGU.AGU_READY,                                                                                             //  STAGE 4 READY FLAG
+
+        AGU_RD <: AGU.AGU_RD,                                                                                                   //  REGISTERS IN USE BY PIPELINE FOR CONTENTION CHECKS
+        DISPATCH_RD <: DISPATCH.DISPATCH_RD,
+        EXECUTE_ALU_RD <: EXECUTE_ALU.EXECUTE_ALU_RD,
+        EXECUTE_ALUDIVIDE_RD <: EXECUTE_ALUDIVIDE.EXECUTE_ALUDIVIDE_RD,
+        EXECUTE_CSRFPU_RD <: EXECUTE_CSRFPU.EXECUTE_CSRFPU_RD,
+        EXECUTE_FASTBASE_RD <: EXECUTE_FASTBASE.EXECUTE_FASTBASE_RD,
+        EXECUTE_LSA_RD <: EXECUTE_LSA.EXECUTE_LSA_RD,
+
+        COMMIT_I_RD <: COMMIT_I.COMMIT_RD,
+        COMMIT_F_RD <: COMMIT_F.COMMIT_F_RD
+    );
+
+    cpu_agu AGU(                                                                                                                // STAGE 4A ADDRESS GENERATION ( AND INSTRUCTION DESPATCH )
+        clock_decode <: clock_decode,
+
+        PRED_TABLE <:> BRANCH_PREDICTION,
+
+        $$for i=1,3 do
+        AGU_I$i$ <: REGISTERS.AGU_I$i$,                                                                                         //  INTEGER REGISTERS
+        $$end
+
+        AGU_ACK <: REGISTERS.AGU_ACK,                                                                                           //  STAGE 3 PIPELINE ACKNOWLEDGE FLAG
+        AGU_PC <: REGISTERS.AGU_PC,                                                                                             //  PC
+        AGU_PC_INC <: REGISTERS.AGU_PC_INC,                                                                                     //  NEXT PC ( for RETURN addresses )
+        AGU_BA <: REGISTERS.AGU_BA,
+        AGU_INSTRUCTION <: REGISTERS.AGU_INSTRUCTION,
+        AGU_FLAGS <: REGISTERS.AGU_FLAGS,                                                                                       //  PIPELINE INSTRUCTION FLAGS
+        AGU_PRED_TABLE <: REGISTERS.AGU_PRED_TABLE,
+
+        DISPATCH_READY <: DISPATCH.DISPATCH_READY,                                                                              //  STAGE 4B DISPATCH UNIT READY FLAG
+        EXECUTE_FASTBASE_READY <: EXECUTE_FASTBASE.EXECUTE_FASTBASE_READY,
+        EXECUTE_ALU_READY <: EXECUTE_ALU.EXECUTE_ALU_READY,                                                                     //  STAGE 5 EXECUTION UNIT READY FLAGS
+
+        CSR_MEPC <: EXECUTE_CSRFPU.CSR_MEPC,                                                                                    //  RETURN ADDRESS FROM INTERRUPT
+        CSR_IRQ_END_ACK <: EXECUTE_CSRFPU.CSR_IRQ_END_ACK                                                                       //  INTERRUPT END ACKNOWLEDGE FLAG
+    );
+
+    cpu_dispatch DISPATCH(                                                                                                      // STAGE 4B ( ADDRESS GENERATION AND ) INSTRUCTION DESPATCH
+        clock_decode <: clock_decode,
+
+        $$for i=1,3 do
+        DISPATCH_I$i$ <: AGU.DISPATCH_I$i$,                                                                                     //  INTEGER REGISTERS
+        $$end
+        $$for i=1,3 do
+        F$i$ <:> F$i$,                                                                                                          //  CPU FLOATING POINT REGISTERS ( READ )
+        $$end
+
+        DISPATCH_ACK <: AGU.DISPATCH_ACK,                                                                                       //  STAGE 4A PIPELINE ACKNOWLEDGE FLAG
+        DISPATCH_INSTRUCTION <: AGU.DISPATCH_INSTRUCTION,
+        DISPATCH_FLAGS <: AGU.DISPATCH_FLAGS,                                                                                   //  PIPELINE INSTRUCTION FLAGS
+        DISPATCH_IMM_LA_SA <: AGU.DISPATCH_IMM_LA_SA,
+
+        EXECUTE_ALUDIVIDE_READY <: EXECUTE_ALUDIVIDE.EXECUTE_ALUDIVIDE_READY,
+        EXECUTE_CSRFPU_READY <: EXECUTE_CSRFPU.EXECUTE_CSRFPU_READY,
+        EXECUTE_LSA_READY <: EXECUTE_LSA.EXECUTE_LSA_READY,                                                                     //  STAGE 5 EXECUTION UNIT READY FLAGS
+    );
+
+    cpu_execute_alu EXECUTE_ALU(                                                                                                // STAGE 5 ALU EXECUTION
+        $$for i=1,3 do
+        EXECUTE_ALU_I$i$ <: AGU.EXECUTE_ALU_I$i$,                                                                               //  INTEGER REGISTERS
+        $$end
+
+        EXECUTE_ALU_ACK <: AGU.EXECUTE_ALU_ACK,                                                                                 //  STAGE 4B PIPELINE ACKNOWLEDGE FLAG
+        EXECUTE_ALU_INSTRUCTION <: AGU.EXECUTE_ALU_INSTRUCTION,                                                                 //  INSTRUCTION
+        EXECUTE_ALU_ALUOP <: AGU.EXECUTE_ALU_ALUOP,                                                                             //  PIPELINE INSTRUCTION FLAGS
+        EXECUTE_ALU_SIGNX <: AGU.EXECUTE_ALU_SIGNX,                                                                             //  PIPELINE INSTRUCTION FLAGS
+        EXECUTE_ALU_CUSTOM <: AGU.EXECUTE_ALU_CUSTOM,                                                                             //  PIPELINE INSTRUCTION FLAGS
+        EXECUTE_ALU_LT <: AGU.EXECUTE_ALU_COMPARE[0,1],
+        EXECUTE_ALU_LTU <: AGU.EXECUTE_ALU_COMPARE[1,1],
+        COMMIT_EXECUTE_ALU_RESULT_ACK <: COMMIT_I.COMMIT_EXECUTE_ALU_RESULT_ACK                                                 //  STAGE 6 COMMIT READY FLAG
+    );
+
+    cpu_execute_aludivide EXECUTE_ALUDIVIDE(                                                                                    // STAGE 5 INTEGER DIVISION EXECUTION
+        $$for i=1,2 do
+        EXECUTE_ALUDIVIDE_I$i$ <: DISPATCH.EXECUTE_ALUDIVIDE_I$i$,                                                              //  INTEGER REGISTERS
+        EXECUTE_ALUDIVIDE_I$i$_SIGN <: DISPATCH.EXECUTE_ALUDIVIDE_I$i$_SIGN,
+        $$end
+
+        EXECUTE_ALUDIVIDE_ACK <: DISPATCH.EXECUTE_ALUDIVIDE_ACK,                                                                //  STAGE 4B PIPELINE ACKNOWLEDGE FLAG
+        EXECUTE_ALUDIVIDE_DESTREG <: DISPATCH.EXECUTE_ALUDIVIDE_DESTREG,                                                        //      PIPELINE DESTINATION REGISTER
+        EXECUTE_ALUDIVIDE_F3 <: DISPATCH.EXECUTE_ALUDIVIDE_F3,                                                                  //      PIPELINE DIVISION/REMAINDER FLAGS
+        EXECUTE_DIVIDE_IS_32 <: DISPATCH.EXECUTE_DIVIDE_IS_32,                                                                  //      PIPELINE 32 BIT OPERATION FLAG
+
+        COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK <: COMMIT_I.COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK                                     //  STAGE 6 COMMIT READY FLAG
+    );
+
+    cpu_execute_csrfpu EXECUTE_CSRFPU(                                                                                          // STAGE 5 CSR AND FPU EXECUTION
+        clock_decode <: clock_decode,
+
+        EXECUTE_CSRFPU_I1 <: DISPATCH.EXECUTE_CSRFPU_I1,                                                                        //  INTEGER REGISTER
+        EXECUTE_CSRFPU_I1_ABS32 <: DISPATCH.EXECUTE_CSRFPU_I1_ABS32,                                                            //      ABSOLUTE VALUE 32 BIT
+        EXECUTE_CSRFPU_I1_ABS64 <: DISPATCH.EXECUTE_CSRFPU_I1_ABS64,                                                            //      ABSOLUTE VALUE 64 BIT
+        $$for i=1,3 do
+        EXECUTE_CSRFPU_F$i$ <: DISPATCH.EXECUTE_CSRFPU_F$i$,                                                                    //  FLOAT REGISTERS
+        $$end
+
+        EXECUTE_CSRFPU_ACK <: DISPATCH.EXECUTE_CSRFPU_ACK,                                                                      //  STAGE 4B PIPELINE ACKNOWLEDGE FLAG
+        EXECUTE_CSRFPU_INSTRUCTION <: DISPATCH.EXECUTE_CSRFPU_INSTRUCTION,                                                      //  INSTRUCTION
+        EXECUTE_CSRFPU_FLAGS <: DISPATCH.EXECUTE_CSRFPU_FLAGS,                                                                  //  PIPELINE INSTRUCTION FLAGS
+
+        COMMIT_EXECUTE_CSRFPU_RESULT_ACK <: COMMIT_I.COMMIT_EXECUTE_CSRFPU_RESULT_ACK,                                          //  STAGE 6 COMMIT I READY FLAG
+        COMMIT_F_EXECUTE_CSRFPU_RESULT_F_ACK <: COMMIT_F.COMMIT_F_EXECUTE_CSRFPU_RESULT_F_ACK,                                  //  STAGE 6 COMMIT F READY FLAG
+
+        RDTIME <: RDTIME,                                                                                                       //  MAIN SYSTEM TICK
+        IRQ_TIMER <: IRQ_TIMER,                                                                                                 //  IRQ FLAGS
+        TIMER_VALID <: TIMER_VALID,
+        IRQ_VBLANK <: IRQ_VBLANK,
+
+        DMA_ACTIVE <: DMA_ACTIVE,
+
+        CSR_NEW_MEPC <: FETCH.CSR_NEW_MEPC,                                                                                     //  INTERRUPT RETURN ADDRESS FROM FETCH
+        // IS_ECALL
+        CSR_IRQ_ACK <: FETCH.CSR_IRQ_ACK,                                                                                       //  INTERRUPT STARTED ACKNOWLEDGE FLAG FROM FETCH
+        CSR_IRQ_END <: AGU.CSR_IRQ_END                                                                                          //  INTERRUPT END ACKNOWLEDGE FLAG FROM AGU
+    );
+
+    cpu_execute_fastbase EXECUTE_FASTBASE(                                                                                      // STAGE 5 INTEGER FASTBASE EXECUTION
+        EXECUTE_FASTBASE_ACK <: AGU.EXECUTE_FASTBASE_ACK,                                                                       //  STAGE 4B PIPELINE ACKNOWLEDGE FLAG
+        EXECUTE_FASTBASE_UI_J <: AGU.EXECUTE_FASTBASE_UI_J,
+        EXECUTE_FASTBASE_DESTREG <: AGU.EXECUTE_FASTBASE_DESTREG,                                                               //      PIPELINE DESTINATION REGISTER
+        EXECUTE_FASTBASE_RESULT <: AGU.EXECUTE_FASTBASE_RESULT,
+
+        COMMIT_EXECUTE_FASTBASE_RESULT_ACK <: COMMIT_I.COMMIT_EXECUTE_FASTBASE_RESULT_ACK                                         //  STAGE 6 COMMIT READY FLAG
+    );
+
+    cpu_execute_lsa EXECUTE_LSA(                                                                                                // STAGE 5 LOAD STORE ATOMIC
+        DMA_ACTIVE <: DMA_ACTIVE,
+
+        MEM_ADDR_LOAD :> MEM_ADDR_LOAD,                                                                                         //  CPU LOAD <-> CPU MEMORY BUS
+        MEM_REQ_LOAD :> MEM_REQ_LOAD,
+        MEM_SIZE_LOAD :> MEM_SIZE_LOAD,
+        MEM_RDATA <: MEM_RDATA,
+        MEM_BUSY_LOAD <: MEM_BUSY_LOAD,
+        MEM_ACK_LOAD <: MEM_ACK_LOAD,
+
+        MEM_ADDR_STORE :> MEM_ADDR_STORE,                                                                                       // CPU STORE <-> CPU MEMORY BUS
+        MEM_REQ_STORE :> MEM_REQ_STORE,
+        MEM_SIZE_STORE :> MEM_SIZE_STORE,
+        MEM_WDATA :> MEM_WDATA,
+        MEM_BUSY_STORE <: MEM_BUSY_STORE,
+        MEM_ACK_STORE <: MEM_ACK_STORE,
+
+        EXECUTE_LSA_I2 <: DISPATCH.EXECUTE_LSA_I2,                                                                                   //  INTEGER REGISTER
+        EXECUTE_LSA_F2 <: DISPATCH.EXECUTE_LSA_F2,                                                                                   //  FLOAT REGISTERS
+
+        EXECUTE_LSA_ACK <: DISPATCH.EXECUTE_LSA_ACK,                                                                                 //  STAGE 4 PIPELINE ACKNOWLEDGE FLAG
+        EXECUTE_LSA_INSTRUCTION <: DISPATCH.EXECUTE_LSA_INSTRUCTION,                                                                 //  INSTRUCTION
+        EXECUTE_LSA_FLAGS <: DISPATCH.EXECUTE_LSA_FLAGS,                                                                             //  PIPELINE INSTRUCTION FLAGS
+        EXECUTE_LSA_ADDRESS <: DISPATCH.EXECUTE_LSA_ADDRESS,
+
+        COMMIT_EXECUTE_LSA_RESULT_ACK <: COMMIT_I.COMMIT_EXECUTE_LSA_RESULT_ACK,                                                //  STAGE 6 COMMIT I READY FLAG
+        COMMIT_F_EXECUTE_LSA_RESULT_F_ACK <: COMMIT_F.COMMIT_F_EXECUTE_LSA_RESULT_F_ACK                                         //  STAGE 6 COMMIT F READY FLAG
+    );
+
+    cpu_commit_i COMMIT_I(                                                                                                      // STAGE 6 COMMIT TO INTEGER REGISTERS
+        $$for i=1,3 do
+        I$i$ <:> I$i$,                                                                                                          //  INTEGER REGISTERS ( WRITE )
+        $$end
+
+        EXECUTE_ALU_RESULT_READY <: EXECUTE_ALU.EXECUTE_ALU_RESULT_READY,                                                       //  STAGE 5 ALU COMPLETE FLAG
+        COMMIT_ALU_RESULT <: EXECUTE_ALU.COMMIT_ALU_RESULT,                                                                     //      RESULT
+        COMMIT_ALU_REGISTER <: EXECUTE_ALU.COMMIT_ALU_REGISTER,                                                                 //      TO REGISTER
+
+        EXECUTE_ALUDIVIDE_RESULT_READY <: EXECUTE_ALUDIVIDE.EXECUTE_ALUDIVIDE_RESULT_READY,                                     //  STAGE 5 ALU DIVIDE COMPLETE FLAG
+        COMMIT_ALUDIVIDE_RESULT <: EXECUTE_ALUDIVIDE.COMMIT_ALUDIVIDE_RESULT,                                                   //      RESULT
+        COMMIT_ALUDIVIDE_REGISTER <: EXECUTE_ALUDIVIDE.COMMIT_ALUDIVIDE_REGISTER,                                               //      TO REGISTER
+
+        EXECUTE_CSRFPU_RESULT_READY <: EXECUTE_CSRFPU.EXECUTE_CSRFPU_RESULT_READY,                                              //  STAGE 5 CSR FPU COMPLETE FLAG
+        COMMIT_CSRFPU_RESULT <: EXECUTE_CSRFPU.COMMIT_CSRFPU_RESULT,                                                            //      RESULT
+        COMMIT_CSRFPU_REGISTER <: EXECUTE_CSRFPU.COMMIT_CSRFPU_REGISTER,                                                        //      TO REGISTER
+
+        EXECUTE_FASTBASE_RESULT_READY <: EXECUTE_FASTBASE.EXECUTE_FASTBASE_RESULT_READY,                                        //  STAGE 5 FASTBASE COMPLETE FLAG
+        COMMIT_FASTBASE_RESULT <: EXECUTE_FASTBASE.COMMIT_FASTBASE_RESULT,                                                      //      RESULT
+        COMMIT_FASTBASE_REGISTER <: EXECUTE_FASTBASE.COMMIT_FASTBASE_REGISTER,                                                  //      TO REGISTER
+
+        EXECUTE_LSA_RESULT_READY <: EXECUTE_LSA.EXECUTE_LSA_RESULT_READY,                                                       //  STAGE 5 LOAD-STORE-ATOMIC COMPLETE FLAG
+        COMMIT_LSA_RESULT <: EXECUTE_LSA.COMMIT_LSA_RESULT,                                                                     //      RESULT
+        COMMIT_LSA_REGISTER <: EXECUTE_LSA.COMMIT_LSA_REGISTER                                                                  //      TO REGISTER
+    );
+
+    cpu_commit_f COMMIT_F(                                                                                                      // STAGE 6 COMMIT TO FLOATING-POINT REGISTERS
+        $$for i=1,3 do
+        F$i$ <:> F$i$,                                                                                                          //  FLOAT REGISTERS ( WRITE )
+        $$end
+
+        EXECUTE_CSRFPU_RESULT_F_READY <: EXECUTE_CSRFPU.EXECUTE_CSRFPU_RESULT_F_READY,                                              //  STAGE 5 CSR FPU COMPLETE FLAG
+        COMMIT_F_CSRFPU_RESULT_F <: EXECUTE_CSRFPU.COMMIT_CSRFPU_F_RESULT,                                                            //      RESULT
+        COMMIT_F_CSRFPU_REGISTER <: EXECUTE_CSRFPU.COMMIT_CSRFPU_F_REGISTER,                                                        //      TO REGISTER
+
+        EXECUTE_LSA_RESULT_F_READY <: EXECUTE_LSA.EXECUTE_LSA_RESULT_F_READY,                                                       //  STAGE 5 LOAD-STORE-ATOMIC COMPLETE FLAG
+        COMMIT_F_LSA_RESULT_F <: EXECUTE_LSA.COMMIT_LSA_RESULT,                                                                     //      RESULT
+        COMMIT_F_LSA_REGISTER <: EXECUTE_LSA.COMMIT_LSA_REGISTER                                                                  //      TO REGISTER
+    );
+
+    uint8               HALT_COUNT = uninitialised;
+    uint8               HALT_COUNT_NEXT <:: HALT_COUNT + ~FETCH.CACHE_HALT;
+
+    uint2               STATE = 1;
+                        $$ STATE_CPU_TOP_RESET      = 1
+                        $$ STATE_CPU_TOP_EXECUTE    = 2
+
+    EXECUTE_CSRFPU.CSR_INC_INSNRET := (
+                                        COMMIT_I.COMMIT_EXECUTE_ALU_RESULT_ACK |
+                                        COMMIT_I.COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK |
+                                        COMMIT_I.COMMIT_EXECUTE_CSRFPU_RESULT_ACK |
+                                        COMMIT_I.COMMIT_EXECUTE_LSA_RESULT_ACK |
+                                        COMMIT_I.COMMIT_EXECUTE_FASTBASE_RESULT_ACK
+                                      ) +
+                                      (
+                                        COMMIT_F.COMMIT_F_EXECUTE_CSRFPU_RESULT_F_ACK |
+                                        COMMIT_F.COMMIT_F_EXECUTE_LSA_RESULT_F_ACK
+                                      ) +
+                                        AGU.BP_TAKEN;
+
+    always {
+        onehot( STATE ) {
+            case 0: {                                                                                                           // STATE_CPU_TOP_RESET
+                if( &HALT_COUNT ) {
+                    STATE = $STATE_CPU_TOP_EXECUTE$;
+                } else {
+                    HALT_COUNT = HALT_COUNT_NEXT;
+                }
+            }
+            case 1: { FETCH.HALT = 0; }                                                                                         // STATE_CPU_TOP_EXECUTE
+        }
+
+        if( reset ) { FETCH.HALT = 1; HALT_COUNT = 0; STATE = $STATE_CPU_TOP_RESET$; }                                          // ON RESET HALT CPU
+    }
+}

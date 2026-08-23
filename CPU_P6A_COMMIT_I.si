@@ -1,0 +1,104 @@
+// CPU PIPELINE STAGE 6A - COMMIT_I
+// CONTROL THE WRITING OF EXECUTION RESULTS TO INTEGER REGISTERS
+// CAN COMMIT ONE INSTRUCTION PER CYCLE
+// POLLS EXECUTION STAGE UNITS IN ORDER OF PRIORITY
+//  LSA-FASTBASE-ALU-CSRFFPU-DIVIDE
+
+unit cpu_commit_i(
+    $$for i=1,3 do
+    simple_dualport_bram_port1 I$i$,                                                                                            // INTEGER REGISTERS WRITE PORT
+    $$end
+
+    input   uint1               EXECUTE_ALU_RESULT_READY,
+    output  uint1               COMMIT_EXECUTE_ALU_RESULT_ACK,
+    input   uint64              COMMIT_ALU_RESULT,                                                                              // FAST ALU EXECUTE RESULT
+    input   uint5               COMMIT_ALU_REGISTER,                                                                            // FAST ALU EXECUTE RESULT REGISTER
+
+    input   uint1               EXECUTE_LSA_RESULT_READY,
+    output  uint1               COMMIT_EXECUTE_LSA_RESULT_ACK,
+    input   uint64              COMMIT_LSA_RESULT,                                                                              // FAST LSA EXECUTE RESULT
+    input   uint5               COMMIT_LSA_REGISTER,                                                                            // FAST LSA EXECUTE RESULT REGISTER
+
+    input   uint1               EXECUTE_CSRFPU_RESULT_READY,
+    output  uint1               COMMIT_EXECUTE_CSRFPU_RESULT_ACK,
+    input   uint64              COMMIT_CSRFPU_RESULT,                                                                           // CSR AND FPU EXECUTE RESULT
+    input   uint5               COMMIT_CSRFPU_REGISTER,                                                                         // CSR AND FPU EXECUTE RESULT REGISTER
+
+    input   uint1               EXECUTE_ALUDIVIDE_RESULT_READY,
+    output  uint1               COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK,
+    input   uint64              COMMIT_ALUDIVIDE_RESULT,                                                                        // ALU DIVISION EXECUTE RESULT
+    input   uint5               COMMIT_ALUDIVIDE_REGISTER,                                                                      // ALU DIVISION EXECUTE RESULT REGISTER
+
+    input   uint1               EXECUTE_FASTBASE_RESULT_READY,
+    output  uint1               COMMIT_EXECUTE_FASTBASE_RESULT_ACK,
+    input   uint64              COMMIT_FASTBASE_RESULT,                                                                           // CSR AND FPU EXECUTE RESULT
+    input   uint5               COMMIT_FASTBASE_REGISTER,                                                                         // CSR AND FPU EXECUTE RESULT REGISTER
+
+    output  uint32              COMMIT_RD                                                                                       // INSTRUCTION COMMIT IS WRITING TO { FLOAT, RD }
+) <reginputs> {
+    $$for i=1,3 do
+    I$i$.wenable1 := 0;
+    $$end
+
+    COMMIT_EXECUTE_ALU_RESULT_ACK := 0;
+    COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK := 0;
+    COMMIT_EXECUTE_CSRFPU_RESULT_ACK := 0;
+    COMMIT_EXECUTE_FASTBASE_RESULT_ACK := 0;
+    COMMIT_EXECUTE_LSA_RESULT_ACK := 0;
+
+    always {                                                                                                                    // ACCEPT RESULT AND COMMIT FROM EXECUTE STAGES
+        COMMIT_RD = 1 << (
+            EXECUTE_FASTBASE_RESULT_READY ? COMMIT_FASTBASE_REGISTER :
+            EXECUTE_ALU_RESULT_READY ? COMMIT_ALU_REGISTER :
+            EXECUTE_CSRFPU_RESULT_READY ? COMMIT_CSRFPU_REGISTER :
+            EXECUTE_LSA_RESULT_READY ? COMMIT_LSA_REGISTER :
+            EXECUTE_ALUDIVIDE_RESULT_READY ? COMMIT_ALUDIVIDE_REGISTER :
+            0
+        );
+
+        if( EXECUTE_FASTBASE_RESULT_READY ) {                                                                            //  INTEGER ALU FOURTH HIGHEST PRIORITY
+            COMMIT_EXECUTE_FASTBASE_RESULT_ACK = 1;
+            $$for i=1,3 do
+            I$i$.addr1 = COMMIT_FASTBASE_REGISTER;
+            I$i$.wdata1 = COMMIT_FASTBASE_RESULT;
+            I$i$.wenable1 = |COMMIT_FASTBASE_REGISTER;
+            $$end
+        } else {
+            if( EXECUTE_ALU_RESULT_READY ) {                                                                            //  INTEGER ALU FOURTH HIGHEST PRIORITY
+                COMMIT_EXECUTE_ALU_RESULT_ACK = 1;
+                $$for i=1,3 do
+                I$i$.addr1 = COMMIT_ALU_REGISTER;
+                I$i$.wdata1 = COMMIT_ALU_RESULT;
+                I$i$.wenable1 = |COMMIT_ALU_REGISTER;
+                $$end
+            } else {
+                if( EXECUTE_CSRFPU_RESULT_READY  ) {                                                                            //  CSR AND FLOATING POINT THIRD HIGHEST PRIORITY
+                    COMMIT_EXECUTE_CSRFPU_RESULT_ACK = 1;
+                    $$for i=1,3 do
+                    I$i$.addr1 = COMMIT_CSRFPU_REGISTER[0,5];
+                    I$i$.wdata1 = COMMIT_CSRFPU_RESULT;
+                    I$i$.wenable1 = |COMMIT_CSRFPU_REGISTER;
+                    $$end
+                } else {
+                    if( EXECUTE_LSA_RESULT_READY ) {                                                                              //  INTEGER DIVISION SECOND HIGHEST PRIORITY
+                        COMMIT_EXECUTE_LSA_RESULT_ACK = 1;
+                        $$for i=1,3 do
+                        I$i$.addr1 = COMMIT_LSA_REGISTER;
+                        I$i$.wdata1 = COMMIT_LSA_RESULT;
+                        I$i$.wenable1 = |COMMIT_LSA_REGISTER;
+                        $$end
+                    } else {
+                        if( EXECUTE_ALUDIVIDE_RESULT_READY ) {                                                                              //  INTEGER DIVISION SECOND HIGHEST PRIORITY
+                            COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK = 1;
+                            $$for i=1,3 do
+                            I$i$.addr1 = COMMIT_ALUDIVIDE_REGISTER;
+                            I$i$.wdata1 = COMMIT_ALUDIVIDE_RESULT;
+                            I$i$.wenable1 = |COMMIT_ALUDIVIDE_REGISTER;
+                            $$end
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

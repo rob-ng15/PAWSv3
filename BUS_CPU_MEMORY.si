@@ -1,0 +1,133 @@
+// CPU MEMORY BUS CONTROLLER
+// INTERFACE 64-BIT CPU BUS TO 32-BIT MEMORY BUS
+// HANDLE ARBITRATION WITH THE BUS CONTROLLER
+// HANDLE ARBITRATION BETWEEN FETCH, STORE AND LOAD
+// HANDLE MISALIGNED LOAD/STORE
+
+unit cpu_memory(
+    input   uint1               clock_cache,                                                                                    // CLOCKS TO PASS TO CPU
+    input   uint1               clock_decode,
+    output  uint8               DEBUG,
+
+    output  uint$addr_width$    MEM_ADDR,                                                                                       // MEMORY INTERFACE LINES
+    output  uint2               MEM_SIZE,
+    output  uint32              MEM_WDATA,
+    output  uint1               MEM_WENABLE,
+    input   uint32              MEM_RDATA,
+    output  uint1               MEM_RENABLE,
+    input   uint1               MEM_BUSY,
+    input   uint1               MEM_ACK,
+
+    input   uint1               DMA_ACTIVE,                                                                                     // DMA AUDIO/COPY/SET IS ACTIVE
+
+    input   uint$CWIDTH$        RDTIME,                                                                                         // MAIN SYSTEM TICK
+    input   uint$CWIDTH$        IRQ_TIMER,                                                                                      // IRQ TIMER TRIGGER VALUE
+    input   uint1               TIMER_VALID,                                                                                    // HAS IRQ TIMER TRIGGER VALUE BEEN FULLY SET
+    input   uint1               IRQ_VBLANK                                                                                      // IRQ VBLANK
+) <reginputs> {
+    uint7               STATE = uninitialised;
+                        $$ STATE_FLS_WAIT = 1
+                        $$ STATE_WAIT_ACK = 2
+                        $$ STATE_STORE_FINISH = 4
+                        $$ STATE_STORE_64BIT = 8
+                        $$ STATE_LOAD = 16
+                        $$ STATE_LOAD_64BIT = 32
+                        $$ STATE_FETCH = 64
+    uint7               NEXT_STATE = uninitialised;
+
+
+    uint1               IS_STORE_64 <:: &CPU.MEM_SIZE_STORE;
+    uint1               IS_LOAD_64 <:: &CPU.MEM_SIZE_LOAD;
+    uint$addr_width$    NEXT_MEM_ADDR <:: MEM_ADDR + 4;                                                                         // NEXT ADDRESS
+
+    cpu CPU(
+        clock_cache <: clock_cache, clock_decode <: clock_decode,
+        DMA_ACTIVE <:DMA_ACTIVE,
+
+        IRQ_TIMER <: IRQ_TIMER,
+        TIMER_VALID <: TIMER_VALID,
+        RDTIME <: RDTIME,
+        IRQ_VBLANK <: IRQ_VBLANK
+    );
+
+    CPU.MEM_ACK_FETCH := 0;
+    CPU.MEM_ACK_LOAD := 0;
+    CPU.MEM_ACK_STORE := 0;
+
+    always {
+        onehot( STATE ) {
+            case 0: {                                                                                                           // STATE_FLS_WAIT
+                if( CPU.MEM_REQ_STORE ) {                                                                                       //  IF STORE REQUEST
+                    CPU.MEM_ACK_STORE = 1; CPU.MEM_BUSY_STORE = 1;                                                              //      ACKNOWLEDGE STORE REQUEST
+                    MEM_ADDR = CPU.MEM_ADDR_STORE;                                                                              //      SET STORE ADDRESS
+                    MEM_WDATA = CPU.MEM_WDATA[0,32];
+                    MEM_SIZE = CPU.MEM_SIZE_STORE;
+                    MEM_WENABLE = 1;                                                                                            //  START WRITE TO MEMORY
+                    NEXT_STATE = IS_STORE_64 ? $STATE_STORE_64BIT$ : $STATE_STORE_FINISH$;                                      //          NEXT IS 64 OR 8/16/32 BIT STORE
+                    STATE = $STATE_WAIT_ACK$;                                                                                   //  GO TO STATE_STORE_WAIT_ACK
+                } else {
+                    if( CPU.MEM_REQ_LOAD ) {                                                                                    //  IF LOAD REQUEST
+                        CPU.MEM_ACK_LOAD = 1; CPU.MEM_BUSY_LOAD = 1; CPU.MEM_RDATA = 0;                                         //      ACKNOWLEDGE LOAD REQUEST, RESET CPU.MEM_RDATA
+                        MEM_ADDR = CPU.MEM_ADDR_LOAD;                                                                           //      SET LOAD ADDRESS
+                        MEM_SIZE = CPU.MEM_SIZE_LOAD;
+                        MEM_RENABLE = 1;                                                                                        //  START READ FROM MEMORY
+                        NEXT_STATE = $STATE_LOAD$;                                                                              //          NEXT IS STATE_LOAD
+                        STATE = $STATE_WAIT_ACK$;                                                                               //  GO TO STATE_WAIT_ACK
+                    } else {
+                        if( CPU.MEM_REQ_FETCH ) {                                                                               //  IF FETCH REQUEST
+                            CPU.MEM_ACK_FETCH = 1; CPU.MEM_BUSY_FETCH = 1;                                                      //      ACKNOWLEDGE FETCH REQUEST
+                            MEM_ADDR = CPU.MEM_ADDR_PC; MEM_SIZE = 2b10;                                                        //      SET PC ADDRESS AND 32 BIT READ
+                            NEXT_STATE = $STATE_FETCH$;                                                                         //      NEXT IS STATE_FETCH
+                            MEM_RENABLE = 1;                                                                                    //      START READ FROM MEMORY
+                            STATE = $STATE_WAIT_ACK$;                                                                           //      GO TO STATE_WAIT_ACK
+                        }
+                    }
+                }
+            }
+
+            case 1: { if( MEM_ACK ) { MEM_RENABLE = 0; MEM_WENABLE = 0; STATE = NEXT_STATE; } }                                 //  STATE_WAIT_ACK
+
+            case 2: { if( ~MEM_BUSY ) { CPU.MEM_BUSY_STORE = 0; STATE = $STATE_FLS_WAIT$; } }                                   //  STATE_STORE_FINISH
+            case 3: {                                                                                                           //  STATE_STORE_64BIT
+                if( ~MEM_BUSY ) {
+                    MEM_ADDR = NEXT_MEM_ADDR; MEM_WDATA = CPU.MEM_WDATA[32,32]; MEM_WENABLE = 1;
+                    NEXT_STATE = $STATE_STORE_FINISH$; STATE = $STATE_WAIT_ACK$;
+                }
+            }
+
+            case 4: {                                                                                                           //  STATE_LOAD
+                if( ~MEM_BUSY ) {                                                                                               //      IF ~MEM_BUSY
+                    switch( CPU.MEM_SIZE_LOAD ) {                                                                               //          COPY DATA
+                        case 2b00: { CPU.MEM_RDATA = MEM_RDATA[ { CPU.MEM_ADDR_LOAD[0,1], 3b000 },  8 ]; }                      //              8 BIT
+                        case 2b01: { CPU.MEM_RDATA = MEM_RDATA[                                 0, 16 ]; }                      //              16 BIT
+                        default:   { CPU.MEM_RDATA = MEM_RDATA; }                                                               //              32/64 BIT
+                    }
+                    if( IS_LOAD_64 ) {                                                                                          //          IF 64BIT
+                        MEM_ADDR = NEXT_MEM_ADDR; MEM_RENABLE = 1;                                                              //              SET NEXT ADDRESS AND START READ
+                        NEXT_STATE = $STATE_LOAD_64BIT$; STATE = $STATE_WAIT_ACK$;                                              //              NEXT STATE_LOAD_64BIT GO TO STATE_WAIT_ACK
+                    } else {                                                                                                    //          ELSE
+                        CPU.MEM_BUSY_LOAD = 0;                                                                                  //              SIGNAL COMPLETE
+                        STATE = $STATE_FLS_WAIT$;                                                                               //              RETURN TO WAIT
+                    }
+                }
+            }
+            case 5: {                                                                                                           //  STATE_LOAD_64BIT
+                if( ~MEM_BUSY ) {                                                                                               //      IF ~MEM_BUSY
+                    CPU.MEM_RDATA[32,32] = MEM_RDATA;                                                                           //          COPY DATA
+                    CPU.MEM_BUSY_LOAD = 0;                                                                                      //          SIGNAL COMPLETE
+                    STATE = $STATE_FLS_WAIT$;                                                                                   //          RETURN TO WAIT
+                }
+            }
+
+            case 6: {                                                                                                           //  STATE_FETCH
+                if( ~MEM_BUSY ) {                                                                                               //      IF ~MEM_BUSY
+                    CPU.MEM_INSTRUCTION = MEM_RDATA;                                                                            //          COPY DATA
+                    CPU.MEM_BUSY_FETCH = 0;                                                                                     //          SIGNAL COMPLETE
+                    STATE = $STATE_FLS_WAIT$;                                                                                   //          RETURN TO WAIT
+                }
+            }
+        }
+
+        if( reset ) { CPU.MEM_BUSY_FETCH = 0; CPU.MEM_BUSY_LOAD = 0; CPU.MEM_BUSY_STORE = 0; STATE = $STATE_FLS_WAIT$; }        // IF RESET CANCEL BUSY FLAGS AND GO TO STATE_FLS_WAIT
+    }
+}

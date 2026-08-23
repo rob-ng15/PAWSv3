@@ -1,0 +1,161 @@
+unit cpu_execute_fastbase(
+    output  uint1               EXECUTE_FASTBASE_READY,
+    input   uint1               EXECUTE_FASTBASE_ACK,
+
+    input   uint1               EXECUTE_FASTBASE_UI_J,
+    input   uint5               EXECUTE_FASTBASE_DESTREG,
+    input   int64               EXECUTE_FASTBASE_RESULT,
+
+    output  uint1               EXECUTE_FASTBASE_RESULT_READY,
+    input   uint1               COMMIT_EXECUTE_FASTBASE_RESULT_ACK,
+    output  uint64              COMMIT_FASTBASE_RESULT,
+    output  uint5               COMMIT_FASTBASE_REGISTER,
+
+    output  uint32              EXECUTE_FASTBASE_RD                                                                             // REGISTER IS WRITING TO { FLOAT, RD }
+) <reginputs> {
+    fastbase_execute EXECUTE( COMMIT_ACK <: COMMIT.ACK );
+    fastbase_execute_j EXECUTE_J( COMMIT_ACK <: COMMIT.ACK_J );
+
+    fastbase_commit COMMIT(
+        RESULT_READY :> EXECUTE_FASTBASE_RESULT_READY,
+        COMMIT_EXECUTE_FASTBASE_RESULT_ACK <: COMMIT_EXECUTE_FASTBASE_RESULT_ACK,
+        COMMIT_FASTBASE_RESULT :> COMMIT_FASTBASE_RESULT,
+        COMMIT_FASTBASE_REGISTER :> COMMIT_FASTBASE_REGISTER,
+
+        READY <: EXECUTE.COMMIT_RESULT_READY,
+        READY_J <: EXECUTE_J.COMMIT_RESULT_READY
+    );
+
+    EXECUTE.START := 0; EXECUTE_J.START := 0;
+
+    always {
+        uint3       STATE = uninitialised;
+        uint32      RD = uninitialised;
+
+
+        onehot( STATE ) {
+            case 0: {
+                RD = EXECUTE_FASTBASE_ACK << EXECUTE_FASTBASE_DESTREG;                                                                               // SET / CLEAR THE REGISTER CONTENTION FLAG
+
+                if( EXECUTE_FASTBASE_ACK ) {                                                                                         // WAIT FOR AGU TO ACKNOWLEDGE INSTRUCTION IS READY
+                    EXECUTE_FASTBASE_READY = 0;
+                    STATE = EXECUTE_FASTBASE_UI_J ? 2 : 4;
+                }
+            }
+            case 1: {
+                if( EXECUTE.READY ) {
+                    EXECUTE.DESTREG = EXECUTE_FASTBASE_DESTREG;
+                    COMMIT.DESTREG = EXECUTE_FASTBASE_DESTREG;
+                    COMMIT.RESULT = EXECUTE_FASTBASE_RESULT;
+
+                    EXECUTE.START = 1; EXECUTE_FASTBASE_READY = 1; STATE = 1;
+                }
+            }
+            case 2: {
+                if( EXECUTE_J.READY ) {
+                    EXECUTE_J.DESTREG = EXECUTE_FASTBASE_DESTREG;
+                    COMMIT.DESTREG_J = EXECUTE_FASTBASE_DESTREG;
+                    COMMIT.RESULT_J = EXECUTE_FASTBASE_RESULT;
+
+                    EXECUTE_J.START = 1; EXECUTE_FASTBASE_READY = 1; STATE = 1;
+                }
+            }
+        }
+
+        EXECUTE_FASTBASE_RD = RD | EXECUTE.RD | EXECUTE_J.RD | COMMIT.RD;
+
+        if( reset ) {
+            RD = 0; EXECUTE_FASTBASE_READY = 1; STATE = 1;
+            EXECUTE.START = 0; EXECUTE_J.START = 0;
+        }
+    }
+}
+
+unit fastbase_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_ACK,
+    output  uint1               COMMIT_RESULT_READY
+) <reginputs> {
+    uint3               STATE = 1;
+
+    COMMIT_RESULT_READY := STATE[2,1];
+
+    always {
+        onehot( STATE ) {
+            case 0: { if( START ) { READY = 0; STATE = 2; RD[ DESTREG, 1 ] = 1; } }
+            case 1: { STATE = 4; }
+            case 2: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit fastbase_execute_j(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_ACK,
+    output  uint1               COMMIT_RESULT_READY
+) <reginputs> {
+    uint3               STATE = 1;
+
+    COMMIT_RESULT_READY := STATE[2,1];
+
+    always {
+        onehot( STATE ) {
+            case 0: { if( START ) { READY = 0; STATE = 2; RD[ DESTREG, 1 ] = 1; } }
+            case 1: { STATE = 4; }
+            case 2: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit fastbase_commit(
+    output  uint32              RD,
+    output  uint1               RESULT_READY,
+
+    input   uint1               READY,
+    output  uint1               ACK,
+    input   uint64              RESULT,
+    input   uint5               DESTREG,
+
+    input   uint1               READY_J,
+    output  uint1               ACK_J,
+    input   uint64              RESULT_J,
+    input   uint5               DESTREG_J,
+
+    input   uint1               COMMIT_EXECUTE_FASTBASE_RESULT_ACK,
+    output  uint64              COMMIT_FASTBASE_RESULT,
+    output  uint5               COMMIT_FASTBASE_REGISTER
+) <reginputs> {
+    ACK := 0;
+    ACK_J := 0;
+
+    RESULT_READY := READY | READY_J;
+    RD := 1 << ( READY ? DESTREG : READY_J ? DESTREG_J : 0 );
+
+    always {
+        if( READY ) {
+            COMMIT_FASTBASE_RESULT = RESULT;
+            COMMIT_FASTBASE_REGISTER = DESTREG;
+            ACK = COMMIT_EXECUTE_FASTBASE_RESULT_ACK;
+        } else {
+            if( READY_J ) {
+                COMMIT_FASTBASE_RESULT = RESULT_J;
+                COMMIT_FASTBASE_REGISTER = DESTREG_J;
+                ACK_J = COMMIT_EXECUTE_FASTBASE_RESULT_ACK;
+            }
+        }
+    }
+}

@@ -1,0 +1,2444 @@
+    // EXECUTE_CSRFPU_FLAGS = { STORE, LOAD, JUMP, FPU_FAST, FPU_CONVERT, FPU, FENCE, CSR, ATOMIC, ALU_SIGNX, ALU_FAST, ALU, WR_F, WR }
+    $$ EX_CSRFPU_IS_WR =          "EXECUTE_CSRFPU_FLAGS[ 0,1]"
+    $$ EX_CSRFPU_IS_WR_F =        "EXECUTE_CSRFPU_FLAGS[ 1,1]"
+    $$ EX_CSRFPU_IS_CSR =         "EXECUTE_CSRFPU_FLAGS[ 2,1]"
+    $$ EX_CSRFPU_IS_FPU =         "EXECUTE_CSRFPU_FLAGS[ 3,1]"
+    $$ EX_CSRFPU_IS_FPU_CONVERT = "EXECUTE_CSRFPU_FLAGS[ 4,1]"
+    $$ EX_CSRFPU_IS_FPU_FAST =    "EXECUTE_CSRFPU_FLAGS[ 5,1]"
+
+unit cpu_execute_csrfpu(
+    input   uint1               clock_decode,
+
+    $$for i=1,3 do
+    input   uint64              EXECUTE_CSRFPU_F$i$,                                                                            // FLOAT REGISTERS
+    $$end
+    input   uint64              EXECUTE_CSRFPU_I1,                                                                              // INTEGER REGISTER
+    input   uint64              EXECUTE_CSRFPU_I1_ABS64,                                                                        // ABSOLUTE VALUE OF INTEGER REGISTER FOR CONVERSIONS
+    input   uint32              EXECUTE_CSRFPU_I1_ABS32,
+
+    output  uint1               EXECUTE_CSRFPU_READY,
+    input   uint1               EXECUTE_CSRFPU_ACK,
+
+    input   uint32              EXECUTE_CSRFPU_INSTRUCTION,
+    input   uint6               EXECUTE_CSRFPU_FLAGS,
+
+    output  uint1               EXECUTE_CSRFPU_RESULT_READY,
+    input   uint1               COMMIT_EXECUTE_CSRFPU_RESULT_ACK,
+    output  uint64              COMMIT_CSRFPU_RESULT,
+    output  uint5               COMMIT_CSRFPU_REGISTER,
+
+    output  uint1               EXECUTE_CSRFPU_RESULT_F_READY,
+    input   uint1               COMMIT_F_EXECUTE_CSRFPU_RESULT_F_ACK,
+    output  uint64              COMMIT_CSRFPU_F_RESULT,
+    output  uint5               COMMIT_CSRFPU_F_REGISTER,
+
+    output  uint64              EXECUTE_CSRFPU_RD,                                                                              // INSTRUCTION IN EXECUTE IS WRITING TO { FLOAT, RD }
+
+    output  uint$addr_width$    CSR_MEPC,
+    output  uint$addr_width$    CSR_MTVEC,
+    output  uint1               CSR_IRQ_PENDING,
+    output  uint4               CSR_IRQ_VECTOR,
+    input   uint1               CSR_IRQ_ACK,
+    output  uint1               CSR_IRQ_ACK_ACK,
+    input   uint1               CSR_IRQ_END,
+    output  uint1               CSR_IRQ_END_ACK,
+    input   uint1               CSR_ECALL_REQ,
+    input   uint$addr_width$    CSR_NEW_MEPC,
+
+    input   uint1               DMA_ACTIVE,                                                                                     // DMA AUDIO/COPY/SET IS ACTIVE
+
+    input   uint$CWIDTH$        IRQ_TIMER,                                                                                      // IRQ TIMER TRIGGER VALUE
+    input   uint1               TIMER_VALID,                                                                                    // HAS IRQ TIMER TRIGGER VALUE BEEN FULLY SET
+    input   uint$CWIDTH$        RDTIME,
+    input   uint1               IRQ_VBLANK,                                                                                     // IRQ VBLANK
+
+    input   uint3               CSR_INC_INSNRET
+) <reginputs> {
+$$if VERILATOR then
+    uint64  COMMITS[4] = { 0, 0, 0, 0 };
+    uint24  COUNT = 0;
+$$end
+
+    uint6               STATE = 1;
+
+    brom uint14 immediate_rom[96] = {                                                                                           // FLOATING-POINT IMMEDIATE LOOKUP TABLE
+                                                                                                                                // SINGLE PRECISION { 1b sign, 8b exponent, 2b msb of mantissa }
+        11b10111111100,                                                                                                         // -1.0
+        11b00000000100,                                                                                                         // minimum positive normal
+        11b00110111100,                                                                                                         // 1 x 2^-16
+        11b00111000000,                                                                                                         // 1 x 2^-15
+        11b00111011100,                                                                                                         // 1 x 2^-8
+        11b00111100000,                                                                                                         // 1 x 2^-7
+        11b00111101100,                                                                                                         // 0.0625
+        11b00111110000,                                                                                                         // 0.125
+        11b00111110100,                                                                                                         // 0.25
+        11b00111110101,                                                                                                         // 0.3125
+        11b00111110110,                                                                                                         // 0.375
+        11b00111110111,                                                                                                         // 0.4375
+        11b00111111000,                                                                                                         // 0.5
+        11b00111111001,                                                                                                         // 0.625
+        11b00111111010,                                                                                                         // 0.75
+        11b00111111011,                                                                                                         // 0.875
+        11b00111111100,                                                                                                         // 1.0
+        11b00111111101,                                                                                                         // 1.25
+        11b00111111110,                                                                                                         // 1.5
+        11b00111111111,                                                                                                         // 1.75
+        11b01000000000,                                                                                                         // 2.0
+        11b01000000001,                                                                                                         // 2.5
+        11b01000000010,                                                                                                         // 3.0
+        11b01000000100,                                                                                                         // 4.0
+        11b01000001000,                                                                                                         // 8.0
+        11b01000001100,                                                                                                         // 16.0
+        11b01000011000,                                                                                                         // 128 2^7
+        11b01000011100,                                                                                                         // 256 2^8
+        11b01000111000,                                                                                                         // 2^15
+        11b01000111100,                                                                                                         // 2^16
+        11b01111111100,                                                                                                         // +INF
+        11b01111111110,                                                                                                         // NaN
+
+                                                                                                                                // DOUBLE PRECISION { 1b sign, 11b exponent, 2b msb of mantissa }
+        14b10111111111100,                                                                                                      // -1.0
+        14b00000000000100,                                                                                                      // minimum positive normal
+        14b00111110111100,                                                                                                      // 1 x 2^-16
+        14b00111111000000,                                                                                                      // 1 x 2^-15
+        14b00111111011100,                                                                                                      // 1 x 2^-8
+        14b00111111100000,                                                                                                      // 1 x 2^-7
+        14b00111111101100,                                                                                                      // 0.0625
+        14b00111111110000,                                                                                                      // 0.125
+        14b00111111110100,                                                                                                      // 0.25
+        14b00111111110101,                                                                                                      // 0.3125
+        14b00111111110110,                                                                                                      // 0.375
+        14b00111111110111,                                                                                                      // 0.4375
+        14b00111111111000,                                                                                                      // 0.5
+        14b00111111111001,                                                                                                      // 0.625
+        14b00111111111010,                                                                                                      // 0.75
+        14b00111111111011,                                                                                                      // 0.875
+        14b00111111111100,                                                                                                      // 1.0
+        14b00111111111101,                                                                                                      // 1.25
+        14b00111111111110,                                                                                                      // 1.5
+        14b00111111111111,                                                                                                      // 1.75
+        14b01000000000000,                                                                                                      // 2.0
+        14b01000000000001,                                                                                                      // 2.5
+        14b01000000000010,                                                                                                      // 3.0
+        14b01000000000100,                                                                                                      // 4.0
+        14b01000000001000,                                                                                                      // 8.0
+        14b01000000001100,                                                                                                      // 16.0
+        14b01000000011000,                                                                                                      // 128 2^7
+        14b01000000011100,                                                                                                      // 256 2^8
+        14b01000000111000,                                                                                                      // 2^15
+        14b01000000111100,                                                                                                      // 2^16
+        14b01111111111100,                                                                                                      // +INF
+        14b01111111111110,                                                                                                      // NaN
+
+                                                                                                                                // HALF PRECISION { 1b sign, 5b exponent, 2b msb of mantissa }
+        8b10111100,                                                                                                             // -1.0
+        8b00000100,                                                                                                             // minimum positive normal
+        8b00000000,                                                                                                             // 1 x 2^-16 ( subnormal -> 0 )
+        8b00000000,                                                                                                             // 1 x 2^-15 ( subnormal -> 0 )
+        8b00011100,                                                                                                             // 1 x 2^-8
+        8b00100000,                                                                                                             // 1 x 2^-7
+        8b00101100,                                                                                                             // 0.0625
+        8b00110000,                                                                                                             // 0.125
+        8b00110100,                                                                                                             // 0.25
+        8b00110101,                                                                                                             // 0.3125
+        8b00110110,                                                                                                             // 0.375
+        8b00110111,                                                                                                             // 0.4375
+        8b00111000,                                                                                                             // 0.5
+        8b00111001,                                                                                                             // 0.625
+        8b00111010,                                                                                                             // 0.75
+        8b00111011,                                                                                                             // 0.875
+        8b00111100,                                                                                                             // 1.0
+        8b00111101,                                                                                                             // 1.25
+        8b00111110,                                                                                                             // 1.5
+        8b00111111,                                                                                                             // 1.75
+        8b01000000,                                                                                                             // 2.0
+        8b01000001,                                                                                                             // 2.5
+        8b01000010,                                                                                                             // 3.0
+        8b01000100,                                                                                                             // 4.0
+        8b01001000,                                                                                                             // 8.0
+        8b01001100,                                                                                                             // 16.0
+        8b01011000,                                                                                                             // 128 2^7
+        8b01100100,                                                                                                             // 256 2^8
+        8b01111000,                                                                                                             // 2^15
+        8b01111100,                                                                                                             // +INF
+        8b01111100,                                                                                                             // +INF
+        8b01111110                                                                                                              // NaN
+    };
+
+    uint10              BIAS_TABLE[4] = { $BIAS32$, $BIAS64$, $BIAS16$, 10b1111111111 };                                        // BIAS FOR DIFFERENT PRECISIONS
+    uint3               operation <:: {                                                                                         // PRESENT INSTRUCTION ROUTE
+                                        ~( $EX_CSRFPU_IS_FPU_FAST$ | $EX_CSRFPU_IS_FPU_CONVERT$ ),
+                                        $EX_CSRFPU_IS_FPU_CONVERT$,
+                                        $EX_CSRFPU_IS_FPU_FAST$
+                                      };
+    uint2               RMODE <:: &Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f3 ? CSR.OUT_FPUFLAGS[5,2] :                             // ROUNDING MODE FROM INSTRUCTION OR FRM
+                                                                            Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f3[0,2];
+    uint5               ACTION <:: Rtype( EXECUTE_CSRFPU_INSTRUCTION ).opp[4,1] ?
+                                        ( Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[2,2] == 2b10 ) ? 5b00010 :                     // IDENTIFY UNIT { fused, sqrt, div, mul, add }
+                                        ( Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[2,2] == 2b11 ) ?                               //                 4      3     2    1    0
+                                                { 1b0, Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[5,1], ~Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[5,1], 2b00 } :
+                                                                              5b00001 :
+                                                                              5b10000;
+    uint3               CNV_TYPE <:: {
+                                        ( Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[2,5] == 5b11000 ),                             // FD2IL
+                                        ( Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[2,5] == 5b11010 ),                             // IL2FD
+                                        ( Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[2,5] == 5b01000 )                              // CHANGE PRECISION HSD <-> HSD, FROUND IF RS2[2,1]
+                                     };
+    uint6               CNV_MB[4] = { 29, 0, 42, -1 };                                                                          // SHIFT AMOUNT TO PUT ROUNDING BIT INTO THE CORRECT POSITION
+    int13               CNV_EXP <:: fp64( REPACK_F1.repack ).exponent -                                                         // EXTRACT EXPONENT AND REMOVE BIAS
+                                    BIAS_TABLE[ Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2] ];
+
+    uint7   FAST_TYPE <:: {
+                            ( Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[2,5] == 5b11100 ) & Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f3[0,1],   // FCLASS
+                            ( Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[2,5] == 5b11110 ) & Rtype( EXECUTE_CSRFPU_INSTRUCTION ).sr2[0,1],  // FLI
+                            ( Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[2,5] == 5b11100 ) & ~Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f3[0,1],   // FMV F -> I
+                            ( Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[2,5] == 5b11110 ) & ~Rtype( EXECUTE_CSRFPU_INSTRUCTION ).sr2[0,1], // FMV I -> F
+                            Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[2,5] == 5b00100,                                                 // FSGNJ FSGNJN FSGNJX
+                            Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[2,5] == 5b10100,                                                 // FEQ FLT FLE
+                            Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[2,5] == 5b00101                                                  // FMIN FMAX
+                          };
+
+    typeF TYPE_F1 <@clock_decode> ( dsh <: Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2], a <: EXECUTE_CSRFPU_F1 );               // CLASSIFY F1 { ZF, INF, sNAN, qNAN, ZERO }
+    typeF TYPE_F2 <@clock_decode> ( dsh <: Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2], a <: EXECUTE_CSRFPU_F2 );               // CLASSIFY F2 { ZF, INF, sNAN, qNAN, ZERO }
+    typeF TYPE_F3 <@clock_decode> ( dsh <: Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2], a <: EXECUTE_CSRFPU_F3 );               // CLASSIFY F3 { ZF, INF, sNAN, qNAN, ZERO }
+    typeF TYPE_CP <@clock_decode> ( dsh <: Rtype( EXECUTE_CSRFPU_INSTRUCTION ).sr2[0,2], a <: EXECUTE_CSRFPU_F1 );              // FORCE CLASSIFICATION FOR changeprecision
+    repackage_wide REPACK_F1 <@clock_decode> ( dsh <: Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2], a <: EXECUTE_CSRFPU_F1 );    // PACK F1 FIELDS INTO BITFIELDS OF DOUBLE-PRECISION
+    repackage_wide REPACK_F2 <@clock_decode> ( dsh <: Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2], a <: EXECUTE_CSRFPU_F2 );    // PACK F2 FIELDS INTO BITFIELDS OF DOUBLE-PRECISION
+    repackage_wide REPACK_F3 <@clock_decode> ( dsh <: Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2], a <: EXECUTE_CSRFPU_F3 );    // PACK F3 FIELDS INTO BITFIELDS OF DOUBLE-PRECISION
+    repackage_wide REPACK_CP <@clock_decode> ( dsh <: Rtype( EXECUTE_CSRFPU_INSTRUCTION ).sr2[0,2], a <: EXECUTE_CSRFPU_F1 );   // changeprecision SIGN, EXPONENT (with bias), FRACTION
+
+    uint3   FLTEQ <:: { FPUcompare.equal, FPUcompare.less, FPUcompare.less | FPUcompare.equal };
+    floatcompare FPUcompare <@clock_decode> (                                                                                   // FLOATING POINT COMPARISONS
+        a <: REPACK_F1.repack, b <: REPACK_F2.repack,                                                                           // PASS REPACKED VALUES TO COMPARE
+        F1_ZERO_FRACTION <: TYPE_F1.type[4,1],                                                                                  // A FRACTION 0?
+        F2_ZERO_FRACTION <: TYPE_F2.type[4,1]                                                                                   // B FRACTION 0?
+    );
+
+    CSRblock CSR(                                                                                                               // RISC-V CSR REGISTERS + INTERRUPT CONTROLLER
+        INC_INSNRET <: CSR_INC_INSNRET,                                                                                         // INSTRUCTION RETIRED FLAGS
+        DMA_ACTIVE <: DMA_ACTIVE,                                                                                               // FOR PERFORMANCE COUNTERS
+        PC_NEXT <: CSR_NEW_MEPC,                                                                                                // NEXT INSTRUCTION FOR MEPC
+        RDTIME <: RDTIME, IRQ_VBLANK <: IRQ_VBLANK, IRQ_TIMER <: IRQ_TIMER, TIMER_VALID <: TIMER_VALID,                         // HARDWARE IRQ FLAGS
+        CSR_ECALL_REQ <: CSR_ECALL_REQ,                                                                                         // SOFTWARE IRQ FLAG
+        CSR_MEPC :> CSR_MEPC, CSR_MTVEC :> CSR_MTVEC,                                                                           //  TO/FROM FETCH IRQ CONTROL SIGNALS
+        IRQ_PENDING :> CSR_IRQ_PENDING, IRQ_VECTOR :> CSR_IRQ_VECTOR,
+        IRQ_ACK <: CSR_IRQ_ACK, IRQ_ACK_ACK :> CSR_IRQ_ACK_ACK, IRQ_END <: CSR_IRQ_END, IRQ_END_ACK :> CSR_IRQ_END_ACK,         // CS[R][W] INSTRUCTION FLAGS AND VALUES
+        function3 <: CSR( EXECUTE_CSRFPU_INSTRUCTION ).f3, rs1 <: CSR( EXECUTE_CSRFPU_INSTRUCTION ).sr1,
+        CSR_REG <: CSR( EXECUTE_CSRFPU_INSTRUCTION ).csr, I1 <: EXECUTE_CSRFPU_I1
+    );
+
+    fpufast_minmax_execute FAST_MNX( COMMIT_F_ACK <: COMMIT_F.FPUFAST_MNX_ACK );                                                    // FPU EXECUTION BLOCKS     MIN/MAX
+    fpufast_fsnj_execute FAST_SNJ( COMMIT_F_ACK <: COMMIT_F.FPUFAST_SNJ_ACK );                                                      // FPU EXECUTION BLOCKS     SGN
+    fpufast_compare_execute FAST_CMP( COMMIT_ACK <: COMMIT_I.FPUFAST_CMP_ACK );                                                     // FPU EXECUTION BLOCKS     LT LE
+    fpufast_fli_execute FAST_FLI( COMMIT_F_ACK <: COMMIT_F.FPUFAST_FLI_ACK );                           // FPU EXECUTION BLOCKS     LI
+    fpufast_cls_execute FAST_CLS( COMMIT_ACK <: COMMIT_I.FPUFAST_CLS_ACK );                           // FPU EXECUTION BLOCKS     CLASS
+    fpufast_mv2i_execute FAST_M2I( COMMIT_ACK <: COMMIT_I.FPUFAST_M2I_ACK );                           // FPU EXECUTION BLOCKS     MV -> I
+    fpufast_mv2f_execute FAST_M2F( COMMIT_F_ACK <: COMMIT_F.FPUFAST_M2F_ACK );                           // FPU EXECUTION BLOCKS     MV -> F
+    fpuconvert_i2f_execute CONVERT_I2F( COMMIT_F_ACK <: COMMIT_F.FPUCONVERT_I2F_ACK );                                          //                          CONVERSIONS
+    fpuconvert_f2i_execute CONVERT_F2I( COMMIT_ACK <: COMMIT_I.FPUCONVERT_F2I_ACK );                                            //                          CONVERSIONS
+    fpuconvert_cp_execute CONVERT_CP( COMMIT_F_ACK <: COMMIT_F.FPUCONVERT_CP_ACK );                                             //                          CONVERSIONS
+    fpuconvert_r_execute CONVERT_R( COMMIT_F_ACK <: COMMIT_F.FPUCONVERT_R_ACK );                                                //                          CONVERSIONS
+    fpucalc_fma_execute CALC_FMA( COMMIT_ACK <: COMMIT_F.FPUCALC_FMA_ACK );                                                     //                          + - * AND FUSED
+    fpucalc_div_execute CALC_DIV( COMMIT_ACK <: COMMIT_F.FPUCALC_DIV_ACK );                                                     //                          /
+    fpucalc_sqrt_execute CALC_SQRT( COMMIT_ACK <: COMMIT_F.FPUCALC_SQRT_ACK );                                                  //                          SQUARE ROOT
+
+    csrfpu_commit_i COMMIT_I(                                                                                                   // COMMIT TO INTEGR REGISTER
+        RESULT_READY :> EXECUTE_CSRFPU_RESULT_READY,
+        COMMIT_EXECUTE_CSRFPU_RESULT_ACK <: COMMIT_EXECUTE_CSRFPU_RESULT_ACK,
+        COMMIT_CSRFPU_RESULT :> COMMIT_CSRFPU_RESULT,
+        COMMIT_CSRFPU_REGISTER :> COMMIT_CSRFPU_REGISTER,
+
+        CSR_RESULT <: CSR.result,
+        CSR_DESTREG <: Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd,
+
+        FPUFAST_CLS_READY <: FAST_CLS.COMMIT_RESULT_READY,
+
+        FPUFAST_M2I_READY <: FAST_M2I.COMMIT_RESULT_READY,
+
+        FPUFAST_CMP_READY <: FAST_CMP.COMMIT_RESULT_READY,
+
+        FPUCONVERT_F2I_READY <: CONVERT_F2I.COMMIT_RESULT_READY,
+        FPUCONVERT_F2I_RESULT <: CONVERT_F2I.COMMIT_RESULT,
+        FPUCONVERT_F2I_DESTREG <: CONVERT_F2I.COMMIT_DESTREG
+    );
+
+    csrfpu_commit_f COMMIT_F(                                                                                                   // COMMIT TO FLOATING-POINT REGISTER
+        RESULT_READY :> EXECUTE_CSRFPU_RESULT_F_READY,
+        COMMIT_EXECUTE_CSRFPU_F_RESULT_ACK <: COMMIT_F_EXECUTE_CSRFPU_RESULT_F_ACK,
+        COMMIT_CSRFPU_F_RESULT :> COMMIT_CSRFPU_F_RESULT,
+        COMMIT_CSRFPU_F_REGISTER :> COMMIT_CSRFPU_F_REGISTER,
+
+        FPUFAST_FLI_READY <: FAST_FLI.COMMIT_F_RESULT_READY,
+
+        FPUFAST_M2F_READY <: FAST_M2F.COMMIT_F_RESULT_READY,
+
+        FPUFAST_MNX_READY <: FAST_MNX.COMMIT_F_RESULT_READY,
+
+        FPUFAST_SNJ_READY <: FAST_SNJ.COMMIT_F_RESULT_READY,
+
+        FPUCONVERT_I2F_READY <: CONVERT_I2F.COMMIT_F_RESULT_READY,
+        FPUCONVERT_I2F_RESULT <: CONVERT_I2F.COMMIT_RESULT,
+        FPUCONVERT_I2F_DESTREG <: CONVERT_I2F.COMMIT_DESTREG,
+
+        FPUCONVERT_CP_READY <: CONVERT_CP.COMMIT_F_RESULT_READY,
+        FPUCONVERT_CP_RESULT <: CONVERT_CP.COMMIT_RESULT,
+        FPUCONVERT_CP_DESTREG <: CONVERT_CP.COMMIT_DESTREG,
+
+        FPUCONVERT_R_READY <: CONVERT_R.COMMIT_F_RESULT_READY,
+        FPUCONVERT_R_RESULT <: CONVERT_R.COMMIT_RESULT,
+        FPUCONVERT_R_DESTREG <: CONVERT_R.COMMIT_DESTREG,
+
+        FPUCALC_FMA_READY <: CALC_FMA.COMMIT_RESULT_READY,
+        FPUCALC_FMA_RESULT <: CALC_FMA.COMMIT_RESULT,
+        FPUCALC_FMA_DESTREG <: CALC_FMA.COMMIT_DESTREG,
+
+        FPUCALC_DIV_READY <: CALC_DIV.COMMIT_RESULT_READY,
+        FPUCALC_DIV_RESULT <: CALC_DIV.COMMIT_RESULT,
+        FPUCALC_DIV_DESTREG <: CALC_DIV.COMMIT_DESTREG,
+
+        FPUCALC_SQRT_READY <: CALC_SQRT.COMMIT_RESULT_READY,
+        FPUCALC_SQRT_RESULT <: CALC_SQRT.COMMIT_RESULT,
+        FPUCALC_SQRT_DESTREG <: CALC_SQRT.COMMIT_DESTREG
+    );
+
+    repackage_actual DOMINMAX( dsh <: Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2] );
+    make_actual SIGNINJ( dsh <: Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2], exp <: fp64( REPACK_F1.repack ).exponent, fraction <: fp64( REPACK_F1.repack ).fraction );
+
+    DOMINMAX.a := |( TYPE_F1.type[1,2] | TYPE_F2.type[1,2] ) ? Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f3[1,1] ? 64h7FF8000000000000 :                     // FMINM FMAXM ANY NAN -> NAN
+( TYPE_F1.type[2,1] | TYPE_F2.type[2,1] ) | ( TYPE_F1.type[1,1] & TYPE_F2.type[1,1] ) ? 64h7FF8000000000000 :                     // FMIN FMAX sNAN or BOTH qNAN -> NAN
+                                                TYPE_F1.type[1,1] ? REPACK_F2.repack : REPACK_F1.repack :                                 //  A == NAN -> B, B == NAN -> A
+                            ( Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f3[0,1] ^ FPUcompare.less ) ? REPACK_F1.repack : REPACK_F2.repack;                                  //  ELSE MIN/MAX AND SELECT REGISTER
+
+    SIGNINJ.sign := ( Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f3[1,1] ? fp64( REPACK_F1.repack ).sign : Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f3[0,1] ) ^ fp64( REPACK_F2.repack ).sign;                              // DETERMINE SIGN FOR INJECTION ^ FOR JX, ~ FOR JN = FOR J
+
+    FPUcompare.F1_OR_F2_NAN := |( TYPE_F1.type[1,2] | TYPE_F2.type[1,2] );
+    FPUcompare.F1_AND_F2_ZERO := ( TYPE_F1.type[0,1] & TYPE_F2.type[0,1] );
+
+    CSR.START := STATE[1,1] &
+                 FAST_CLS.READY & FAST_FLI.READY & FAST_M2I.READY & FAST_M2F.READY & FAST_SNJ.READY & FAST_CMP.READY & FAST_MNX.READY &
+                 CONVERT_I2F.READY & CONVERT_F2I.READY & CONVERT_CP.READY & CONVERT_R.READY &
+                 CALC_FMA.READY & CALC_DIV.READY & CALC_SQRT.READY;
+
+    FAST_CLS.START := STATE[3,1] & FAST_CLS.READY & FAST_TYPE[6,1];
+    FAST_FLI.START := STATE[3,1] & FAST_FLI.READY & FAST_TYPE[5,1];
+    FAST_M2I.START := STATE[3,1] & FAST_M2I.READY & FAST_TYPE[4,1];
+    FAST_M2F.START := STATE[3,1] & FAST_M2F.READY & FAST_TYPE[3,1];
+    FAST_SNJ.START := STATE[3,1] & FAST_MNX.READY & FAST_TYPE[2,1];
+    FAST_CMP.START := STATE[3,1] & FAST_MNX.READY & FAST_TYPE[1,1];
+    FAST_MNX.START := STATE[3,1] & FAST_MNX.READY & FAST_TYPE[0,1];
+
+    CONVERT_I2F.START := STATE[4,1] & CONVERT_I2F.READY & CNV_TYPE[1,1];
+    CONVERT_F2I.START := STATE[4,1] & CONVERT_F2I.READY & CNV_TYPE[2,1];
+    CONVERT_CP.START := STATE[4,1] & CONVERT_CP.READY & CNV_TYPE[0,1] & ~Rtype( EXECUTE_CSRFPU_INSTRUCTION ).sr2[2,1];
+    CONVERT_R.START := STATE[4,1] & CONVERT_R.READY & CNV_TYPE[0,1] & Rtype( EXECUTE_CSRFPU_INSTRUCTION ).sr2[2,1];
+
+    CALC_FMA.START := STATE[5,1] & CALC_FMA.READY & ( |ACTION[0,2] | ACTION[4,1] );
+    CALC_DIV.START := STATE[5,1] & CALC_DIV.READY & ACTION[2,1];
+    CALC_SQRT.START := STATE[5,1] & CALC_SQRT.READY & ACTION[3,1];
+
+    COMMIT_I.CSR_READY := STATE[2,1];
+
+    CSR.W_FPUFLAGS := COMMIT_I.FPUFAST_CMP_ACK | COMMIT_F.FPUFAST_MNX_ACK |                                                            // UPDATE CSR FLOATING POINT FLAGS
+                      COMMIT_I.FPUCONVERT_F2I_ACK |
+                      COMMIT_F.FPUCONVERT_I2F_ACK | COMMIT_F.FPUCONVERT_CP_ACK | COMMIT_F.FPUCONVERT_R_ACK |
+                      COMMIT_F.FPUCALC_FMA_ACK | COMMIT_F.FPUCALC_DIV_ACK | COMMIT_F.FPUCALC_SQRT_ACK;
+    CSR.IN_FPUFLAGS := CSR.OUT_FPUFLAGS | (                                                                                     // MERGE OLD AND NEW FLAGS
+                                            ( COMMIT_I.FPUFAST_CMP_ACK ? FAST_CMP.OUT_FPUFLAGS : 0 ) |
+                                            ( COMMIT_F.FPUFAST_MNX_ACK ? FAST_MNX.OUT_FPUFLAGS : 0 ) |
+                                            ( COMMIT_I.FPUCONVERT_F2I_ACK ? CONVERT_F2I.OUT_FPUFLAGS : 0 ) |
+                                            ( COMMIT_F.FPUCONVERT_I2F_ACK ? CONVERT_I2F.OUT_FPUFLAGS : 0 ) |
+                                            ( COMMIT_F.FPUCONVERT_CP_ACK ? CONVERT_CP.OUT_FPUFLAGS : 0 ) |
+                                            ( COMMIT_F.FPUCONVERT_R_ACK ? CONVERT_R.OUT_FPUFLAGS : 0 ) |
+                                            ( COMMIT_F.FPUCALC_FMA_ACK ? CALC_FMA.OUT_FPUFLAGS : 0 ) |
+                                            ( COMMIT_F.FPUCALC_DIV_ACK ? CALC_DIV.OUT_FPUFLAGS : 0 ) |
+                                            ( COMMIT_F.FPUCALC_SQRT_ACK ? CALC_SQRT.OUT_FPUFLAGS : 0 )
+                                          );
+
+    immediate_rom.addr := { Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2], Rtype( EXECUTE_CSRFPU_INSTRUCTION ).sr1 };             // SELECT IMMEDIATE VALUE
+
+    always {
+        uint64      RD = uninitialised;                                                                                         // REGISTER CONTENTION FLAG
+
+        onehot( STATE ) {
+            case 0: {
+                RD = EXECUTE_CSRFPU_ACK << { $EX_CSRFPU_IS_WR_F$, Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd };                     // SET REGISTER CONTENTION FLAG
+                if( EXECUTE_CSRFPU_ACK ) {                                                                                      // WAIT FOR AGU TO ACKNOWLEDGE INSTRUCTION IS READY
+                    EXECUTE_CSRFPU_READY = 0;                                                                                   //  HALT AGU SENDING MORE INSTRUCTIONS
+                    STATE =         $EX_CSRFPU_IS_CSR$ ? 2 :
+                               $EX_CSRFPU_IS_FPU_FAST$ ? 8 :
+                            $EX_CSRFPU_IS_FPU_CONVERT$ ? 16 :
+                                                         32;
+                }
+            }
+
+            case 1: { if( CSR.START ) { STATE = 4; } }                                                                          // CSR EXECUTE START ( when FPU units are idle )
+            case 2: { if( COMMIT_I.CSR_ACK ) { STATE = 1; EXECUTE_CSRFPU_READY = 1; } }                                         // CSR COMMIT
+
+            case 3: {                                                                                                           // FPU FAST
+                onehot( FAST_TYPE ) {
+                    case 0: { // FMIN FMAX
+                        if( FAST_MNX.READY ) {
+                            COMMIT_F.FPUFAST_MNX_RESULT = DOMINMAX.repack;
+                            COMMIT_F.FPUFAST_MNX_DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+
+                            FAST_MNX.FLAGS = { |( TYPE_F1.type[1,2] | TYPE_F2.type[1,2] ), 4b0000 };                            // FLAGS SIGNALLING NAN INPUT
+                            FAST_MNX.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                            STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                        }
+                    }
+                    case 1: { // FEQ FLT FLE
+                        if( FAST_CMP.READY ) {
+                            COMMIT_I.FPUFAST_CMP_RESULT = ~|( TYPE_F1.type[1,2] | TYPE_F2.type[1,2] ) & FLTEQ[ Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f3, 1 ];                                                   // FEQ FLT FLE 0 IF NAN ELSE COMPARISON FLAG
+                            COMMIT_I.FPUFAST_CMP_DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+
+                            FAST_CMP.FLAGS = {                                                                                                // RETURN NV FLAG IF FLT OR FLE AND NAN IS AN INPUT
+                        Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f3[2,1] ? 1b0 :
+                        Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f3[1,1] ? ( TYPE_F1.type[2,1] | TYPE_F2.type[2,1] ) : |( TYPE_F1.type[1,2] | TYPE_F2.type[1,2] ),
+                        4b0000
+                    };
+                            FAST_CMP.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                            STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                        }
+                    }
+                    case 2: { // FSGNJ FSGNJN FSGNJX
+                        if( FAST_SNJ.READY ) {
+                            COMMIT_F.FPUFAST_SNJ_RESULT = SIGNINJ.repack;
+                            COMMIT_F.FPUFAST_SNJ_DESTREG  = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+
+                            FAST_SNJ.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                            STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                        }
+                    }
+                    case 3: { // FMV I->F
+                        if( FAST_M2F.READY ) {
+                            FAST_M2F.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                            COMMIT_F.FPUFAST_M2F_RESULT = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,1] ? EXECUTE_CSRFPU_I1 :                                                                          // FMV.W.D
+                     Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[1,1] ? { 48hffffffffffff, EXECUTE_CSRFPU_I1[0,16] } :                                                 // FMV.W.H
+                                {     32hffffffff, EXECUTE_CSRFPU_I1[0,32] };                                                 // FMV.W.S :
+                            COMMIT_F.FPUFAST_M2F_DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+
+                            STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                        }
+                    }
+                    case 4: { // FMV F-> I
+                        if( FAST_M2I.READY ) {
+                            FAST_M2I.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                            COMMIT_I.FPUFAST_M2I_RESULT = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,1] ? REPACK_F1.repack :                                                                                            // FMV.D.W
+                                                          Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[1,1] ? { {48{fp64( REPACK_F1.repack ).sign}}, fp64( REPACK_F1.repack ).exponent[0,5], fp64( REPACK_F1.repack ).fraction[42,10] } :               // FMV.H.W
+                                                                     { {32{fp64( REPACK_F1.repack ).sign}}, fp64( REPACK_F1.repack ).exponent[0,8], fp64( REPACK_F1.repack ).fraction[29,23] };                // FMV.S.W
+                            COMMIT_I.FPUFAST_M2I_DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+
+                            STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                        }
+                    }
+                    case 5: { // FLI
+                        if( FAST_FLI.READY ) {
+                            FAST_FLI.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                            COMMIT_F.FPUFAST_FLI_RESULT = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,1] ? {                                                                   // EXTRACT DOUBLE IMMEDIATE
+                                    immediate_rom.rdata[13, 1],
+                                    immediate_rom.rdata[ 2,11],
+                                    immediate_rom.rdata[ 0, 2],
+                                    50h0
+                                } :
+                     Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[1,1] ? {                                                                   // EXTRACT HALF PRECISION IMMEDIATE
+                                    48hffffffffffff,                                                //  NAN BOXED
+                                    immediate_rom.rdata[ 7, 1],
+                                    immediate_rom.rdata[ 2, 5],
+                                    immediate_rom.rdata[ 0, 2],
+                                    8h0
+                                } :
+                                {                                                                   // EXTRACT SINGLE PRECISION IMMEDIATE
+                                32hffffffff,                                                    //  NAN BOXED
+                                    immediate_rom.rdata[10, 1],
+                                    immediate_rom.rdata[ 2, 8],
+                                    immediate_rom.rdata[ 0, 2],
+                                    21h0
+                                };
+                            COMMIT_F.FPUFAST_FLI_DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+
+                            STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                        }
+                    }
+                    case 6: { // FCLASS
+                        if( FAST_CLS.READY ) {
+                            FAST_CLS.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                            COMMIT_I.FPUFAST_CLS_RESULT = {                                                                                         // FCLASS
+                                                            TYPE_F1.type[1,1],                                                                          // 512  qNAN
+                                                            TYPE_F1.type[2,1],                                                                          // 256  sNAN
+                                                            TYPE_F1.type[3,1] & ~REPACK_F1.repack[63,1],                                                    // 128  +INF
+                                                            ~|TYPE_F1.type & ~REPACK_F1.repack[63,1],                                                       // 64   +NORMAL
+                                                            TYPE_F1.type[0,1] & ~REPACK_F1.repack[63,1] & ~TYPE_F1.type[4,1],                                   // 32   +SUBNORMAL
+                                                            TYPE_F1.type[0,1] & ~REPACK_F1.repack[63,1] & TYPE_F1.type[4,1],                                    // 16   +0
+                                                            TYPE_F1.type[0,1] & REPACK_F1.repack[63,1] & TYPE_F1.type[4,1],                                     // 8    -0
+                                                            TYPE_F1.type[0,1] & REPACK_F1.repack[63,1] & ~TYPE_F1.type[4,1],                                    // 4    -SUBNORMAL
+                                                            ~|TYPE_F1.type & REPACK_F1.repack[63,1],                                                        // 2    -NORMAL
+                                                            TYPE_F1.type[3,1] & REPACK_F1.repack[63,1]                                                      // 1    -INF
+                                                        };
+                            COMMIT_I.FPUFAST_CLS_DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+
+                            STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                        }
+                    }
+                }
+            }
+
+            case 4: {                                                                                                           // FPU CONVERT
+                onehot( CNV_TYPE ) {
+                    case 0: { // CP OR R
+                        if( Rtype( EXECUTE_CSRFPU_INSTRUCTION ).sr2[2,1] ) {
+                            if( CONVERT_R.READY ) {
+                                CONVERT_R.RMODE = RMODE; CONVERT_R.MB = CNV_MB[ Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2] ];
+                                CONVERT_R.DBIAS = BIAS_TABLE[ Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2] ];
+                                CONVERT_R.FUNCTION7 = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2]; CONVERT_R.RS2 = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).sr2[0,1];
+                                CONVERT_R.F1 = EXECUTE_CSRFPU_F1; CONVERT_R.F1_X = REPACK_F1.repack; CONVERT_R.F1_TYPE = TYPE_F1.type;
+                                CONVERT_R.EXP = CNV_EXP;
+
+                                CONVERT_R.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                                STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                            }
+                        } else {
+                            if( CONVERT_CP.READY ) {
+                                CONVERT_CP.RMODE = RMODE; CONVERT_CP.MB = CNV_MB[ Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2] ];
+                                CONVERT_CP.DBIAS = BIAS_TABLE[ Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2] ]; CONVERT_CP.SBIAS = BIAS_TABLE[ Rtype( EXECUTE_CSRFPU_INSTRUCTION ).sr2[0,2] ];
+                                CONVERT_CP.FUNCTION7 = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2]; CONVERT_CP.RS2 = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).sr2[0,2];
+                                CONVERT_CP.F1_CP = REPACK_CP.repack; CONVERT_CP.F1_TYPE_CP = TYPE_CP.type;
+
+                                CONVERT_CP.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                                STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                            }
+                        }
+                    }
+                    case 1: { // I2F
+                        if( CONVERT_I2F.READY ) {
+                            CONVERT_I2F.RMODE = RMODE; CONVERT_I2F.MB = CNV_MB[ Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2] ];
+                            CONVERT_I2F.DBIAS = BIAS_TABLE[ Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2] ];
+                            CONVERT_I2F.FUNCTION7 = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2]; CONVERT_I2F.RS2 = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).sr2[0,2];
+                            CONVERT_I2F.I1 = EXECUTE_CSRFPU_I1; CONVERT_I2F.I1_ABS32 = EXECUTE_CSRFPU_I1_ABS32; CONVERT_I2F.I1_ABS64 = EXECUTE_CSRFPU_I1_ABS64;
+
+                            CONVERT_I2F.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                            STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                        }
+                    }
+                    case 2: { // F2I
+                        if( CONVERT_F2I.READY ) {
+                            CONVERT_F2I.RMODE = RMODE;
+                            CONVERT_F2I.DBIAS = BIAS_TABLE[ Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2] ];
+                            CONVERT_F2I.RS2 = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).sr2;
+                            CONVERT_F2I.F1 = EXECUTE_CSRFPU_F1; CONVERT_F2I.F1_X = REPACK_F1.repack; CONVERT_F2I.F1_TYPE = TYPE_F1.type;
+                            CONVERT_F2I.EXP = CNV_EXP;
+
+                            CONVERT_F2I.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                            STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                        }
+                    }
+                }
+            }
+
+            case 5: {                                                                                                           // FPU CALC
+                onehot( ACTION ) {
+                    default: {
+                        if( CALC_FMA.READY ) {
+                            CALC_FMA.ACTION = ACTION;
+                            CALC_FMA.RMODE = RMODE;
+                            CALC_FMA.dsh = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2]; CALC_FMA.BIAS = BIAS_TABLE[ Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2] ];
+                            CALC_FMA.OPCODE = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).opp[2,5]; CALC_FMA.FUNCTION7 = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[2,5];
+                            CALC_FMA.F1_X = REPACK_F1.repack; CALC_FMA.F1_TYPE = TYPE_F1.type;
+                            CALC_FMA.F2_X = REPACK_F2.repack; CALC_FMA.F2_TYPE = TYPE_F2.type;
+                            CALC_FMA.F3_X = REPACK_F3.repack; CALC_FMA.F3_TYPE = TYPE_F3.type;
+
+                            CALC_FMA.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                            STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                        }
+                    }
+                    case 2: {
+                        if( CALC_DIV.READY ) {
+                            CALC_DIV.RMODE = RMODE;
+                            CALC_DIV.dsh = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2]; CALC_DIV.BIAS = BIAS_TABLE[ Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2] ];
+                            CALC_DIV.F1_X = REPACK_F1.repack; CALC_DIV.F1_TYPE = TYPE_F1.type;
+                            CALC_DIV.F2_X = REPACK_F2.repack; CALC_DIV.F2_TYPE = TYPE_F2.type;
+
+                            CALC_DIV.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                            STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                        }
+                    }
+                    case 3: {
+                        if( CALC_SQRT.READY ) {
+                            CALC_SQRT.RMODE = RMODE;
+                            CALC_SQRT.dsh = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2]; CALC_SQRT.BIAS = BIAS_TABLE[ Rtype( EXECUTE_CSRFPU_INSTRUCTION ).f7[0,2] ];
+                            CALC_SQRT.F1_X = REPACK_F1.repack; CALC_SQRT.F1_TYPE = TYPE_F1.type;
+
+                            CALC_SQRT.DESTREG = Rtype( EXECUTE_CSRFPU_INSTRUCTION ).rd;
+                            STATE = 1; EXECUTE_CSRFPU_READY = 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        EXECUTE_CSRFPU_RD = RD | COMMIT_I.RD |
+                            FAST_CLS.RD | FAST_M2I.RD | FAST_CMP.RD |
+                            CONVERT_F2I.RD |
+                            {
+                                COMMIT_F.RD |
+                                FAST_FLI.RD | FAST_M2F.RD | FAST_MNX.RD | FAST_SNJ.RD |
+                                CONVERT_I2F.RD | CONVERT_CP.RD | CONVERT_R.RD |
+                                CALC_FMA.RD | CALC_DIV.RD | CALC_SQRT.RD,
+                                32h00000000
+                            };
+
+$$if VERILATOR then
+        COMMITS[ CSR_INC_INSNRET & 3 ] = COMMITS[ CSR_INC_INSNRET & 3 ] + 1;
+        COUNT = COUNT + 1;
+        if( COUNT == 1000000 ) {
+            COUNT = 0;
+            __display( "[ 0 = %d ] [ 1 = %d ] [ 2 = %d ] [ 3 = %d ]",COMMITS[0],COMMITS[1],COMMITS[2],COMMITS[3] );
+        }
+$$end
+        if( reset ) { RD = 0; EXECUTE_CSRFPU_READY = 1; STATE = 1; }
+    }
+}
+
+unit fpufast_minmax_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_F_ACK,
+    output  uint1               COMMIT_F_RESULT_READY,
+
+    input   uint5               FLAGS,                                                                                          //  REPACKED INTO DOUBLE BIT FIELDS
+    output  uint5               OUT_FPUFLAGS                                                                                   // NEW FPU FLAGS
+) <reginputs> {
+    uint3               STATE = 1;
+
+    COMMIT_F_RESULT_READY := STATE[2,1];
+
+    OUT_FPUFLAGS := FLAGS;                                                                                   // FLAGS SIGNALLING NAN INPUT :
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { if( COMMIT_F_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit fpufast_fsnj_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_F_ACK,
+    output  uint1               COMMIT_F_RESULT_READY
+) <reginputs> {
+    uint3               STATE = 1;
+
+    COMMIT_F_RESULT_READY := STATE[2,1];
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { if( COMMIT_F_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit fpufast_compare_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_ACK,
+    output  uint1               COMMIT_RESULT_READY,
+
+    input   uint5               FLAGS,
+    output  uint5               OUT_FPUFLAGS                                                                                    // NEW FPU FLAGS
+) <reginputs> {
+    uint3               STATE = 1;
+
+    COMMIT_RESULT_READY := STATE[2,1];
+
+    OUT_FPUFLAGS := FLAGS;
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit fpufast_fli_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_F_ACK,
+    output  uint1               COMMIT_F_RESULT_READY
+) <reginputs> {
+    uint3               STATE = 1;
+
+    COMMIT_F_RESULT_READY := STATE[2,1];
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { if( COMMIT_F_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit fpufast_cls_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_ACK,
+    output  uint1               COMMIT_RESULT_READY
+) <reginputs> {
+    uint3               STATE = 1;
+
+    COMMIT_RESULT_READY := STATE[2,1];
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit fpufast_mv2i_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_ACK,
+    output  uint1               COMMIT_RESULT_READY
+) <reginputs> {
+    uint3               STATE = 1;
+
+    COMMIT_RESULT_READY := STATE[2,1];
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit fpufast_mv2f_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_F_ACK,
+    output  uint1               COMMIT_F_RESULT_READY
+) <reginputs> {
+    uint3               STATE = 1;
+
+    COMMIT_F_RESULT_READY := STATE[2,1];
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { if( COMMIT_F_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit fpuconvert_i2f_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_F_ACK,
+    output  uint1               COMMIT_F_RESULT_READY,
+
+    output  uint64              COMMIT_RESULT,
+    output  uint5               COMMIT_DESTREG,
+
+    input   uint10  DBIAS,
+    input   uint2   RMODE,
+    input   uint2   FUNCTION7,                                                                                                  // ROUNDING MODE FLAG
+    input   uint2   RS2,
+    input   uint6   MB,
+    input   int64   I1,                                                                                                        // INTEGER SOURCE REGISTER
+    input   uint32  I1_ABS32,                                                                                                  //  32 BIT ABSOLUTE VALUE
+    input   uint64  I1_ABS64,                                                                                                  //  64 BIT ABSOLUTE VALUE
+    output  int64   RESULT,                                                                                                     // RESULT
+    output  uint5   OUT_FPUFLAGS                                                                                                //  OUTPUT CSR FLAGS
+) <reginputs> {
+    uint3               STATE = 1;
+
+    intlong2float FPUIL2F(                                                                                                      // INTEGER TO FLOATING-POINT CONVERSION
+        RMODE <: RMODE[0,2], dounsigned <: RS2[0,1], il <: RS2[1,1], dsh <: FUNCTION7[0,2],                                     //  FLAGS ROUNDING, UNSIGNED, 32/64-BIT, HALF/SINGLE/DOUBLE
+        BIAS <: DBIAS, MB <: MB,
+        I1 <: I1, I1_ABS32 <: I1_ABS32, I1_ABS64 <: I1_ABS64,
+        RESULT :> COMMIT_RESULT, OP_FPUFLAGS :> OUT_FPUFLAGS
+    );
+
+    COMMIT_F_RESULT_READY := STATE[2,1];
+    COMMIT_DESTREG := DESTREG;
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { if( COMMIT_F_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+unit fpuconvert_f2i_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_ACK,
+    output  uint1               COMMIT_RESULT_READY,
+
+    output  uint64              COMMIT_RESULT,
+    output  uint5               COMMIT_DESTREG,
+
+    input   uint10  DBIAS,
+    input   uint2   RMODE,
+    input   uint5   RS2,
+    input   int13   EXP,
+    input   uint64  F1,                                                                                                        // FLOATING POINT SOURCE REGISTERS
+    input   uint64  F1_X,                                                                                                      //  REPACKED INTO DOUBLE BIT FIELDS
+    input   uint4   F1_TYPE,                                                                                                   //  TYPE FLAG
+    output  int64   RESULT,                                                                                                     // RESULT
+    output  uint5   OUT_FPUFLAGS                                                                                                //  OUTPUT CSR FLAGS
+) <reginputs> {
+    uint3               STATE = 1;
+
+    uint1               RM_ACTION <:: ( RMODE[0,2] == $RNE$ ) ? 1 :                                                             // ROUNDING MODE MASK FOR FLOATING POINT CONVERSIONS    RNE
+                                      ( RMODE[0,2] == $RTZ$ ) ? 0 :                                                             //                                                      RTZ
+                                      ( RMODE[0,2] == $RDN$ ) ? fp64( F1_X ).sign :                                            //                                                      RDN
+                                                               ~fp64( F1_X ).sign;                                             //                                                      RUP
+
+    float2intlong FPUF2IL(                                                                                                      // FLOTING-POINT TO INTEGER CONVERSION
+        RM_ACTION <: RM_ACTION, dounsigned <: RS2[0,1], domod <: RS2[3,1], il <: RS2[1,1],                                      //  ROUNDING BIT, UNSIGNED, MODULAR CONVERTR, 32/64-BIT
+        BIAS <: DBIAS,
+        F1_X <: F1_X, F1_TYPE <: F1_TYPE,
+        EXP <: EXP,
+        RESULT :> COMMIT_RESULT, OP_FPUFLAGS :> OUT_FPUFLAGS
+    );
+
+    COMMIT_RESULT_READY := STATE[2,1];
+    COMMIT_DESTREG := DESTREG;
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+unit fpuconvert_cp_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_F_ACK,
+    output  uint1               COMMIT_F_RESULT_READY,
+
+    output  uint64              COMMIT_RESULT,
+    output  uint5               COMMIT_DESTREG,
+
+    input   uint10  SBIAS,
+    input   uint10  DBIAS,
+    input   uint2   RMODE,
+    input   uint2   FUNCTION7,                                                                                                  // ROUNDING MODE FLAG
+    input   uint2   RS2,
+    input   uint6   MB,
+    input   uint64  F1_CP,                                                                                                     // FLOATING POINT SOURCE FOR CHANGE PRECISION
+    input   uint4   F1_TYPE_CP,                                                                                                //  TYPE FLAG
+    output  int64   RESULT,                                                                                                     // RESULT
+    output  uint5   OUT_FPUFLAGS                                                                                                //  OUTPUT CSR FLAGS
+) <reginputs> {
+    uint3               STATE = 1;
+
+    uint1               RM_ACTION <:: ( RMODE[0,2] == $RNE$ ) ? 1 :                                                             // ROUNDING MODE MASK FOR FLOATING POINT CONVERSIONS    RNE
+                                      ( RMODE[0,2] == $RTZ$ ) ? 0 :                                                             //                                                      RTZ
+                                      ( RMODE[0,2] == $RDN$ ) ? fp64( F1_CP ).sign :                                            //                                                      RDN
+                                                               ~fp64( F1_CP ).sign;                                             //                                                      RUP
+
+    floatchangeprecision FPUF_CP(                                                                                               // FLOATING-POINT CHANGE PRECISION
+        RM_ACTION <: RM_ACTION, dest <: FUNCTION7, source <: RS2[0,2],                                                     //  ROUNDING BIT, DESTINATION PRECISION, SOUCRE PRECISION
+        DBIAS <: DBIAS, SBIAS <: SBIAS, MB <: MB,
+        F1_X <: F1_CP, F1_TYPE <: F1_TYPE_CP,
+        RESULT :> COMMIT_RESULT, OP_FPUFLAGS :> OUT_FPUFLAGS
+    );
+
+    COMMIT_F_RESULT_READY := STATE[2,1];
+    COMMIT_DESTREG := DESTREG;
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { if( COMMIT_F_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+unit fpuconvert_r_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint1               WR_F,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_F_ACK,
+    output  uint1               COMMIT_F_RESULT_READY,
+
+    output  uint64              COMMIT_RESULT,
+    output  uint5               COMMIT_DESTREG,
+
+    input   uint10  DBIAS,
+    input   uint2   RMODE,
+    input   uint2   FUNCTION7,                                                                                                  // ROUNDING MODE FLAG
+    input   uint1   RS2,
+    input   uint6   MB,
+    input   int13   EXP,
+    input   uint64  F1,                                                                                                        // FLOATING POINT SOURCE REGISTERS
+    input   uint64  F1_X,                                                                                                      //  REPACKED INTO DOUBLE BIT FIELDS
+    input   uint4   F1_TYPE,                                                                                                   //  TYPE FLAG
+    output  int64   RESULT,                                                                                                     // RESULT
+    output  uint5   OUT_FPUFLAGS                                                                                                //  OUTPUT CSR FLAGS
+) <reginputs> {
+    uint3               STATE = 1;
+
+    uint1               RM_ACTION <:: ( RMODE[0,2] == $RNE$ ) ? 1 :                                                             // ROUNDING MODE MASK FOR FLOATING POINT CONVERSIONS    RNE
+                                      ( RMODE[0,2] == $RTZ$ ) ? 0 :                                                             //                                                      RTZ
+                                      ( RMODE[0,2] == $RDN$ ) ? fp64( F1_X ).sign :                                            //                                                      RDN
+                                                               ~fp64( F1_X ).sign;                                             //                                                      RUP
+
+    floatround FPUROUND(                                                                                                        // FLOATING-POINT ROUND ROUNDNX
+        RM_ACTION <: RM_ACTION, dsh <: FUNCTION7, NX <: RS2[0,1],                                                          //  ROUNDING BIT, HALF/SINGLE/DOUBLE, NX
+        BIAS <: DBIAS, MB <: MB,
+        F1 <: F1, F1_X <: F1_X, F1_TYPE <: F1_TYPE,
+        EXP <: EXP,
+        RESULT :> COMMIT_RESULT, OP_FPUFLAGS :> OUT_FPUFLAGS
+    );
+
+    COMMIT_F_RESULT_READY := STATE[2,1];
+    COMMIT_DESTREG := DESTREG;
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { if( COMMIT_F_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit fpucalc_fma_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_ACK,
+    output  uint1               COMMIT_RESULT_READY,
+    output  uint64              COMMIT_RESULT,
+    output  uint5               COMMIT_DESTREG,
+
+    input   uint5   ACTION,
+    input   uint2   RMODE,                                                                                                      // ROUNDING MODE FLAG
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG ( to determine START bit )
+    input   uint10  BIAS,                                                                                                       // FLOATING POINT BIAS
+    input   uint5   OPCODE,                                                                                                     // OPCODE, SINGLE OR FUSED OPERATIONS
+    input   uint5   FUNCTION7,                                                                                                  // DETERMINE SINGLE OPERATION
+    input   uint64  F1_X,                                                                                                      // F1 ( repacked in double bitfields )
+    input   uint5   F1_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } OF INPUT F1
+    input   uint64  F2_X,                                                                                                      // F2 ( repacked in double bitfields )
+    input   uint5   F2_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } OF INPUT F2
+    input   uint64  F3_X,                                                                                                      // sourceReg3F ( repacked in double bitfields )
+    input   uint5   F3_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } OF INPUT sourceReg3F
+    output  uint5   OUT_FPUFLAGS                                                                                               // NEW FPUFLAGS
+) <reginputs> {
+    uint5               STATE = 1;
+
+    donormalexp NORMAL( exp <: FPUfused.EXP );                                                   // HANDLE NORMALISATION
+    doroundcombine MAKERESULT(                                                                                                  // HANDLE ROUNDING AND COMBINING
+        rm <: RMODE, dsh <: dsh, BIAS <: BIAS,
+        bitstream <: NORMAL.normalfraction
+    );
+
+    // FUSED UNIT IS USED FOR   A+B ( AS A*1.0+B )
+    //                          A*B ( AS A*B+0.0 )
+    //                          FUSED MULTIPLY AND ADD OPERATIONS
+    // PASS INPUTS TO FUSED UNITS
+    //                          ADDITION        A*1.0+B
+    //                          SUBTRACTION     A*1.0-B
+    //                          MULTIPLICATION  A*B+0.0
+    //                          FUSED           A*B+C ( with sign swaps as needed )
+    do_float_multiply MULT( BIAS <: BIAS, F1_X <: F1_X );                                                                     // GENERATE PRODUCT SIGN, FRACTION, EXPONENT : MULTIPLY / FUSED
+    floatfused FPUfused(                                                                                                        // FLOAT FUSED-MULTIPLY-ADD
+        BIAS <: BIAS,                                                                                                           // BIAS
+        productfraction <: MULT.fraction, productexp <: MULT.exp,                                                               // MULTIPLICATION RESULTS
+        OF <: MAKERESULT.OF, UF <: MAKERESULT.UF                                                                                // UNDER/OVER FLOW FLAGS FROM WHEN C == 0
+    );
+
+    wide_xINF xINF(); wide_xZERO xZERO( sign <: MULT.sign );                                                 // GENERATE SIGNED INFINITY AND ZERO
+    repackage_actual CALCRESULT( dsh <: dsh, repack :> COMMIT_RESULT );                                                         // REPACKAGE CALCULATION RESULT INTO CORRECT BITFIELDS
+
+    NORMAL.bitstream := ACTION[1,1] ? MULT.fraction ::                                                 // SELECT BITSTREAM FOR NORMALISATION   MULTIPLICATION
+                                             FPUfused.FRACTION;                                                   //                                      FUSED/ADDSUB
+    MAKERESULT.sign := ACTION[1,1] ? MULT.sign :                                                          // SELECT SIGN FOR RESULT               MULTIPLICATION
+                                                           FPUfused.SIGN;                                                       //                                      FUSED/ADDSUB
+    MAKERESULT.exponent := ACTION[1,1] ? MULT.exp :                                               // SELECT EXPONENT FOR RESULT           MULTIPLICATION
+                                                              NORMAL.newexponent;                                               //                                      FUSED/ADDSUB
+    MULT.F2_X := ACTION[0,1] ? { 2b0, BIAS, 52b0 } : F2_X;                                               // IF ADDITION AS A*1.0 ELSE A*B
+    FPUfused.productsign := ( ~ACTION[1,1] & OPCODE[1,1] ) ^ MULT.sign;                                // SELECTION MULTIPLICATION SIGN, SWITCH IF FUSED NEGATE
+    FPUfused.c := ACTION[0,1] ? { FUNCTION7[0,1] ^ fp64( F2_X ).sign, F2_X[0,63] } :                        // ADD/SUB SWITCH SIGN OF B INPUT IF SUBTRACTION
+                                    ACTION[1,1] ? 0 :                                                                           // SET C INPUT TO 0 IF A*B+0.0
+                                                  { OPCODE[0,1] ^ fp64( F3_X ).sign, F3_X[0,63] };                            // SWITCH SIGN OF C INPUT IF SUBTRACTION REQUIRED, FUSED
+    FPUfused.F3_TYPE := ACTION[0,1] ? F2_TYPE :                                                             // SET TYPE OF C TO TYPE OF B FOR ADDITION/SUBTRACTION
+                                           ACTION[1,1] ? 4b0001 :                                                               // SET TYPE OF C TO 0 FOR MULTIPLICATION
+                                                         F3_TYPE;                                                              // SELECT TYPE OF C, FUSED
+    xINF.sign := ACTION[4,1] ? FPUfused.productsign : MULT.sign;                                              // SIGNED INFINITY & ZERO FOR MULT ( fused multiply ) AND DIV
+    FPUfused.F1_OR_F2_INF := ACTION[0,1] ? F1_TYPE[3,1] : ( F1_TYPE[3,1] | F2_TYPE[3,1] );                                   // SET INF NAN AND ZERO FLAGS FOR ADD & SUB / FUSED
+    FPUfused.F1_AND_F2_INF := ACTION[0,1] ? F1_TYPE[3,1] : ( F1_TYPE[3,1] & F2_TYPE[3,1] );
+    FPUfused.F1_OR_F2_NAN := ACTION[0,1] ? |F1_TYPE[1,2] : |( F1_TYPE[1,2] | F2_TYPE[1,2] );
+    FPUfused.F1_OR_F2_ZERO := ACTION[0,1] ? F1_TYPE[0,1] : ( F1_TYPE[0,1] | F2_TYPE[0,1] );
+    FPUfused.F1_AND_F2_ZERO := ACTION[0,1] ? 0 : ( F1_TYPE[0,1] & F2_TYPE[0,1] );
+
+    COMMIT_RESULT_READY := STATE[4,1];
+    COMMIT_DESTREG := DESTREG;
+
+    CALCRESULT.a :=                                                       FPUfused.special[3,1] ? xINF.value :                                 // RETURN SIGNED INFINITY FOR DIVIDE OR FUSED
+                                                                         FPUfused.special[1,1] ? 64h7FF8000000000000 :                        // RETRURN QNAN FROM DIVIDE, SQRT OR FUSED
+                                                           FPUfused.special[0,1] ? 0 :                            // RETURN ZERO FROM DIVIDE OR FUSED
+                    FPUfused.special[4,1] ? FPUfused.c :                                    // RETURN ADDITION INPUT IF MULTIPLY IS 0 FROM FUSED
+                                                                                 MAKERESULT.combined;                         // ELSE RETURN CALCULATION RESULT
+
+    OUT_FPUFLAGS := ACTION[4,1] ? FPUfused.flags :                                                                              //  FUSED MULT-ADD   { NV, --, UF, OF, -- }
+                                  FPUfused.flags & 5b00110;                                                                     //  MULT/ADD/SUB     { --, --, UF, OF, -- }
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { STATE = 8; }
+            case 3: { STATE = 16; }
+            case 4: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit fpucalc_div_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_ACK,
+    output  uint1               COMMIT_RESULT_READY,
+    output  uint64              COMMIT_RESULT,
+    output  uint5               COMMIT_DESTREG,
+
+    input   uint2   RMODE,                                                                                                      // ROUNDING MODE FLAG
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG ( to determine START bit )
+    input   uint10  BIAS,                                                                                                       // FLOATING POINT BIAS
+    input   uint64  F1_X,                                                                                                      // F1 ( repacked in double bitfields )
+    input   uint5   F1_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } OF INPUT F1
+    input   uint64  F2_X,                                                                                                      // F2 ( repacked in double bitfields )
+    input   uint5   F2_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } OF INPUT F2
+    output  uint5   OUT_FPUFLAGS                                                                                                // NEW FPUFLAGS
+) <reginputs> {
+    uint5               STATE = 1;
+
+    donormalexp NORMAL( bitstream <: FPUdivide.fraction);                                                                                  // HANDLE NORMALISATION
+    doroundcombine MAKERESULT(                                                                                                  // HANDLE ROUNDING AND COMBINING
+        rm <: RMODE, dsh <: dsh, BIAS <: BIAS,
+        sign <: RESULT_SIGN, exponent <: FPUdivide.exponent, bitstream <: NORMAL.normalfraction
+    );
+
+    uint7               SB[4] = { 49, 107, 23, -1 };                                                                            // DETERMINE STARTING BIT FOR DIVISION
+    uint1               RESULT_SIGN <:: F1_X[63,1] ^ F2_X[63,1];
+    floatdivide FPUdivide(                                                                                                      // FLOAT DIVISION
+        dsh <: dsh,                                                                                                             // DOUBLE/SINGLE/HALF FLAG, BIAS, ROUNDING MODE FLAG
+        a <: F1_X, F1_TYPE <: F1_TYPE,                                                                                          // A OPERAND FOR A/B { ZF INF sNAN qNAN ZERO }
+        b <: F2_X, F2_TYPE <: F2_TYPE,                                                                                          // B OPERAND FOR A/B { ZF INF sNAN qNAN ZERO }
+        SB <: SB[dsh],                                                                                                          // PASS STARTING BIT
+        OF <: MAKERESULT.OF, UF <: MAKERESULT.UF ,                                                                               // UNDER/OVER FLOW FLAGS
+        flags :> OUT_FPUFLAGS
+    );
+
+    wide_xINF xINF(sign <: RESULT_SIGN ); wide_xZERO xZERO( sign <: RESULT_SIGN );                                                                    // GENERATE SIGNED INFINITY AND ZERO
+    repackage_actual CALCRESULT( dsh <: dsh, repack :> COMMIT_RESULT );                                                         // REPACKAGE CALCULATION RESULT INTO CORRECT BITFIELDS
+
+    FPUdivide.START := STATE[2,1];                                                                                // START    DIVIDE
+
+    COMMIT_RESULT_READY := STATE[4,1];
+    COMMIT_DESTREG := DESTREG;
+
+    CALCRESULT.a :=                                                       FPUdivide.special[3,1] ? xINF.value :                                 // RETURN SIGNED INFINITY FOR DIVIDE OR FUSED
+                                                                         FPUdivide.special[1,1] ? 64h7FF8000000000000 :                        // RETRURN QNAN FROM DIVIDE, SQRT OR FUSED
+                                                           FPUdivide.special[0,1] ? xZERO.value :                            // RETURN ZERO FROM DIVIDE OR FUSED
+                                                                                 MAKERESULT.combined;                           // ELSE RETURN CALCULATION RESULT
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { STATE = 8; }
+            case 3: { if( ~FPUdivide.BUSY ) { STATE = 16; } }
+            case 4: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit fpucalc_sqrt_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+    input   uint5               DESTREG,
+
+    input   uint1               COMMIT_ACK,
+    output  uint1               COMMIT_RESULT_READY,
+    output  uint64              COMMIT_RESULT,
+    output  uint5               COMMIT_DESTREG,
+
+    input   uint2   RMODE,                                                                                                      // ROUNDING MODE FLAG
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG ( to determine START bit )
+    input   uint10  BIAS,                                                                                                       // FLOATING POINT BIAS
+    input   uint64  F1_X,                                                                                                      // F1 ( repacked in double bitfields )
+    input   uint5   F1_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } OF INPUT F1
+    output  uint5   OUT_FPUFLAGS                                                                                                // NEW FPUFLAGS
+) <reginputs> {
+    uint5               STATE = 1;
+
+    donormalexp NORMAL( bitstream <: FPUsqrt.fraction );                                                                                  // HANDLE NORMALISATION
+    doroundcombine MAKERESULT(                                                                                                  // HANDLE ROUNDING AND COMBINING
+        rm <: RMODE, dsh <: dsh, BIAS <: BIAS,
+        exponent <: FPUsqrt.exponent, bitstream <: NORMAL.normalfraction
+    );
+
+    uint7               SB[4] = { 49, 107, 23, -1 };                                                                            // DETERMINE STARTING BIT FOR DIVISION ( /2 FOR SQUAREROOT )
+
+    // https://projectf.io/posts/square-root-in-verilog/
+    floatsqrt FPUsqrt(                                                                                                          // FLOAT SQUARE ROOT
+        dsh <: dsh, BIAS <: BIAS,                                                                                               // DOUBLE/SINGLE/HALF FLAG, BIAS
+        a <: F1_X, F1_TYPE <: F1_TYPE,                                                                                       // A OPERAND FOR SQRT(A) AND { ZF INF sNAN qNAN ZERO }
+        SB <: SB[dsh][1,6],                                                                                                     // PASS STARTING BIT ( HALF OF DIVISION )
+        OF <: MAKERESULT.OF, UF <: MAKERESULT.UF,                                                                                // UNDER/OVER FLOW FLAGS
+        flags :> OUT_FPUFLAGS
+    );
+
+    wide_xINF xINF(); wide_xZERO xZERO();                                                                    // GENERATE SIGNED INFINITY AND ZERO
+    repackage_actual CALCRESULT( dsh <: dsh, repack :> COMMIT_RESULT );                                                         // REPACKAGE CALCULATION RESULT INTO CORRECT BITFIELDS
+
+    FPUsqrt.START := STATE[2,1];                                                                                  //          SQUARE ROOT
+    COMMIT_RESULT_READY := STATE[4,1];
+    COMMIT_DESTREG := DESTREG;
+
+    CALCRESULT.a :=                                                      FPUsqrt.special[1,1] ? 64h7FF8000000000000 :                        // RETRURN QNAN FROM DIVIDE, SQRT OR FUSED
+                                          FPUsqrt.special[6,1] ? F1_X :                                      // RETURN INPUT FROM SQRT
+                                                                                 MAKERESULT.combined;                           // ELSE RETURN CALCULATION RESULT
+
+    always {
+        onehot( STATE ) {
+            case 0: { RD[ DESTREG, 1 ] = START; if( START ) { READY = 0; STATE = 2; } }
+            case 1: { STATE = 4; }
+            case 2: { STATE = 8; }
+            case 3: { if( ~FPUsqrt.BUSY ) { STATE = 16; } }
+            case 4: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit csrfpu_commit_i(
+    output  uint32              RD,
+    output  uint1               RESULT_READY,
+
+    input   uint1               CSR_READY,
+    output  uint1               CSR_ACK,
+    input   uint64              CSR_RESULT,
+    input   uint5               CSR_DESTREG,
+
+    input   uint1               FPUFAST_CLS_READY,
+    output  uint1               FPUFAST_CLS_ACK,
+    input   uint4               FPUFAST_CLS_RESULT,
+    input   uint10              FPUFAST_CLS_DESTREG,
+
+    input   uint1               FPUFAST_M2I_READY,
+    output  uint1               FPUFAST_M2I_ACK,
+    input   uint64              FPUFAST_M2I_RESULT,
+    input   uint5               FPUFAST_M2I_DESTREG,
+
+    input   uint1               FPUFAST_CMP_READY,
+    output  uint1               FPUFAST_CMP_ACK,
+    input   uint1               FPUFAST_CMP_RESULT,
+    input   uint5               FPUFAST_CMP_DESTREG,
+
+    input   uint1               FPUCONVERT_F2I_READY,
+    output  uint1               FPUCONVERT_F2I_ACK,
+    input   uint64              FPUCONVERT_F2I_RESULT,
+    input   uint5               FPUCONVERT_F2I_DESTREG,
+
+    input   uint1               COMMIT_EXECUTE_CSRFPU_RESULT_ACK,
+    output  uint64              COMMIT_CSRFPU_RESULT,
+    output  uint5               COMMIT_CSRFPU_REGISTER
+) <reginputs> {
+    CSR_ACK := 0;
+    FPUFAST_CLS_ACK := 0;
+    FPUFAST_M2I_ACK := 0;
+    FPUFAST_CMP_ACK := 0;
+    FPUCONVERT_F2I_ACK := 0;
+
+        RD := 1 << (
+                           CSR_READY ? CSR_DESTREG :
+                       FPUFAST_M2I_READY ? FPUFAST_M2I_DESTREG :
+                       FPUFAST_CLS_READY ? FPUFAST_CLS_DESTREG :
+                       FPUFAST_CMP_READY ? FPUFAST_CMP_DESTREG :
+                    FPUCONVERT_F2I_READY ? FPUCONVERT_F2I_DESTREG :
+                                       0
+                  );
+
+    COMMIT_CSRFPU_RESULT := CSR_READY ? CSR_RESULT :
+                            FPUFAST_M2I_READY ? FPUFAST_M2I_RESULT :
+                            FPUFAST_CLS_READY ? FPUFAST_CLS_RESULT :
+                            FPUFAST_CMP_READY ? FPUFAST_CMP_RESULT :
+                            FPUCONVERT_F2I_RESULT;
+    COMMIT_CSRFPU_REGISTER := CSR_READY ? CSR_DESTREG :
+                            FPUFAST_M2I_READY ? FPUFAST_M2I_DESTREG :
+                            FPUFAST_CLS_READY ? FPUFAST_CLS_DESTREG :
+                            FPUFAST_CMP_READY ? FPUFAST_CMP_DESTREG :
+                            FPUCONVERT_F2I_DESTREG;
+
+    RESULT_READY := CSR_READY | FPUFAST_CLS_READY | FPUFAST_M2I_READY | FPUFAST_CMP_READY | FPUCONVERT_F2I_READY;
+
+    always {
+        if( CSR_READY ) {
+            CSR_ACK = COMMIT_EXECUTE_CSRFPU_RESULT_ACK;
+        } else {
+            if( FPUFAST_M2I_READY ) {
+                FPUFAST_M2I_ACK = COMMIT_EXECUTE_CSRFPU_RESULT_ACK;
+            } else {
+                if( FPUFAST_CLS_READY ) {
+                    FPUFAST_CLS_ACK = COMMIT_EXECUTE_CSRFPU_RESULT_ACK;
+                } else {
+                    if( FPUFAST_CMP_READY ) {
+                        FPUFAST_CMP_ACK = COMMIT_EXECUTE_CSRFPU_RESULT_ACK;
+                    } else {
+                        if( FPUCONVERT_F2I_READY ) {
+                            FPUCONVERT_F2I_ACK = COMMIT_EXECUTE_CSRFPU_RESULT_ACK;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+unit csrfpu_commit_f(
+    output  uint32              RD,
+    output  uint1               RESULT_READY,
+
+    input   uint1               FPUFAST_FLI_READY,
+    output  uint1               FPUFAST_FLI_ACK,
+    input   uint64              FPUFAST_FLI_RESULT,
+    input   uint5               FPUFAST_FLI_DESTREG,
+
+    input   uint1               FPUFAST_M2F_READY,
+    output  uint1               FPUFAST_M2F_ACK,
+    input   uint64              FPUFAST_M2F_RESULT,
+    input   uint5               FPUFAST_M2F_DESTREG,
+
+    input   uint1               FPUFAST_MNX_READY,
+    output  uint1               FPUFAST_MNX_ACK,
+    input   uint64              FPUFAST_MNX_RESULT,
+    input   uint5               FPUFAST_MNX_DESTREG,
+
+    input   uint1               FPUFAST_SNJ_READY,
+    output  uint1               FPUFAST_SNJ_ACK,
+    input   uint64              FPUFAST_SNJ_RESULT,
+    input   uint5               FPUFAST_SNJ_DESTREG,
+
+    input   uint1               FPUCONVERT_I2F_READY,
+    output  uint1               FPUCONVERT_I2F_ACK,
+    input   uint64              FPUCONVERT_I2F_RESULT,
+    input   uint5               FPUCONVERT_I2F_DESTREG,
+
+    input   uint1               FPUCONVERT_CP_READY,
+    output  uint1               FPUCONVERT_CP_ACK,
+    input   uint64              FPUCONVERT_CP_RESULT,
+    input   uint5               FPUCONVERT_CP_DESTREG,
+
+    input   uint1               FPUCONVERT_R_READY,
+    output  uint1               FPUCONVERT_R_ACK,
+    input   uint64              FPUCONVERT_R_RESULT,
+    input   uint5               FPUCONVERT_R_DESTREG,
+
+    input   uint1               FPUCALC_FMA_READY,
+    output  uint1               FPUCALC_FMA_ACK,
+    input   uint64              FPUCALC_FMA_RESULT,
+    input   uint5               FPUCALC_FMA_DESTREG,
+
+    input   uint1               FPUCALC_DIV_READY,
+    output  uint1               FPUCALC_DIV_ACK,
+    input   uint64              FPUCALC_DIV_RESULT,
+    input   uint5               FPUCALC_DIV_DESTREG,
+
+    input   uint1               FPUCALC_SQRT_READY,
+    output  uint1               FPUCALC_SQRT_ACK,
+    input   uint64              FPUCALC_SQRT_RESULT,
+    input   uint5               FPUCALC_SQRT_DESTREG,
+
+    input   uint1               COMMIT_EXECUTE_CSRFPU_F_RESULT_ACK,
+    output  uint64              COMMIT_CSRFPU_F_RESULT,
+    output  uint5               COMMIT_CSRFPU_F_REGISTER
+) <reginputs> {
+    FPUFAST_FLI_ACK := 0;
+    FPUFAST_M2F_ACK := 0;
+    FPUFAST_MNX_ACK := 0;
+    FPUFAST_SNJ_ACK := 0;
+    FPUCONVERT_I2F_ACK := 0;
+    FPUCONVERT_CP_ACK := 0;
+    FPUCONVERT_R_ACK := 0;
+    FPUCALC_FMA_ACK := 0;
+    FPUCALC_DIV_ACK := 0;
+    FPUCALC_SQRT_ACK := 0;
+
+    RESULT_READY := FPUFAST_FLI_READY | FPUFAST_M2F_READY | FPUFAST_MNX_READY | FPUFAST_SNJ_READY |
+                    FPUCONVERT_I2F_READY | FPUCONVERT_CP_READY | FPUCONVERT_R_READY |
+                    FPUCALC_FMA_READY | FPUCALC_DIV_READY | FPUCALC_SQRT_READY;
+
+    always {
+        RD = RESULT_READY << (
+                    FPUCALC_FMA_READY ? FPUCALC_FMA_DESTREG :
+                    FPUCALC_DIV_READY ? FPUCALC_DIV_DESTREG :
+                   FPUCALC_SQRT_READY ? FPUCALC_SQRT_DESTREG :
+                        FPUFAST_FLI_READY ? FPUFAST_FLI_DESTREG :
+                        FPUFAST_M2F_READY ? FPUFAST_M2F_DESTREG :
+                        FPUFAST_MNX_READY ? FPUFAST_MNX_DESTREG :
+                        FPUFAST_SNJ_READY ? FPUFAST_SNJ_DESTREG :
+                     FPUCONVERT_I2F_READY ? FPUCONVERT_I2F_DESTREG :
+                     FPUCONVERT_CP_READY ? FPUCONVERT_CP_DESTREG :
+                     FPUCONVERT_R_READY ? FPUCONVERT_R_DESTREG :
+                                        0
+                  );
+
+        if( FPUCALC_FMA_READY ) {
+            COMMIT_CSRFPU_F_RESULT = FPUCALC_FMA_RESULT;
+            COMMIT_CSRFPU_F_REGISTER = FPUCALC_FMA_DESTREG;
+            FPUCALC_FMA_ACK = COMMIT_EXECUTE_CSRFPU_F_RESULT_ACK;
+        } else {
+            if( FPUCALC_DIV_READY ) {
+                COMMIT_CSRFPU_F_RESULT = FPUCALC_DIV_RESULT;
+                COMMIT_CSRFPU_F_REGISTER = FPUCALC_DIV_DESTREG;
+                FPUCALC_DIV_ACK = COMMIT_EXECUTE_CSRFPU_F_RESULT_ACK;
+            } else {
+                if( FPUCALC_SQRT_READY ) {
+                    COMMIT_CSRFPU_F_RESULT = FPUCALC_SQRT_RESULT;
+                    COMMIT_CSRFPU_F_REGISTER = FPUCALC_SQRT_DESTREG;
+                    FPUCALC_SQRT_ACK = COMMIT_EXECUTE_CSRFPU_F_RESULT_ACK;
+                } else {
+                    if( FPUFAST_FLI_READY ) {
+                        COMMIT_CSRFPU_F_RESULT = FPUFAST_FLI_RESULT;
+                        COMMIT_CSRFPU_F_REGISTER = FPUFAST_FLI_DESTREG;
+                        FPUFAST_FLI_ACK = COMMIT_EXECUTE_CSRFPU_F_RESULT_ACK;
+                    } else {
+                        if( FPUFAST_M2F_READY ) {
+                            COMMIT_CSRFPU_F_RESULT = FPUFAST_M2F_RESULT;
+                            COMMIT_CSRFPU_F_REGISTER = FPUFAST_M2F_DESTREG;
+                            FPUFAST_M2F_ACK = COMMIT_EXECUTE_CSRFPU_F_RESULT_ACK;
+                        } else {
+                            if( FPUFAST_MNX_READY ) {
+                                COMMIT_CSRFPU_F_RESULT = FPUFAST_MNX_RESULT;
+                                COMMIT_CSRFPU_F_REGISTER = FPUFAST_MNX_DESTREG;
+                                FPUFAST_MNX_ACK = COMMIT_EXECUTE_CSRFPU_F_RESULT_ACK;
+                            } else {
+                                if( FPUFAST_SNJ_READY ) {
+                                    COMMIT_CSRFPU_F_RESULT = FPUFAST_SNJ_RESULT;
+                                    COMMIT_CSRFPU_F_REGISTER = FPUFAST_SNJ_DESTREG;
+                                    FPUFAST_SNJ_ACK = COMMIT_EXECUTE_CSRFPU_F_RESULT_ACK;
+                                } else {
+                                    if( FPUCONVERT_I2F_READY ) {
+                                        COMMIT_CSRFPU_F_RESULT = FPUCONVERT_I2F_RESULT;
+                                        COMMIT_CSRFPU_F_REGISTER = FPUCONVERT_I2F_DESTREG;
+                                        FPUCONVERT_I2F_ACK = COMMIT_EXECUTE_CSRFPU_F_RESULT_ACK;
+                                    } else {
+                                        if( FPUCONVERT_CP_READY ) {
+                                            COMMIT_CSRFPU_F_RESULT = FPUCONVERT_CP_RESULT;
+                                            COMMIT_CSRFPU_F_REGISTER = FPUCONVERT_CP_DESTREG;
+                                            FPUCONVERT_CP_ACK = COMMIT_EXECUTE_CSRFPU_F_RESULT_ACK;
+                                        } else {
+                                            if( FPUCONVERT_R_READY ) {
+                                                COMMIT_CSRFPU_F_RESULT = FPUCONVERT_R_RESULT;
+                                                COMMIT_CSRFPU_F_REGISTER = FPUCONVERT_R_DESTREG;
+                                                FPUCONVERT_R_ACK = COMMIT_EXECUTE_CSRFPU_F_RESULT_ACK;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+// RISC-V CSR REGISTERS - TIMER, COUNTERS, INTERRUPTS, FLOATING-POINT STATUS
+unit csrf(
+    output  uint8   CSRf(0),
+    input   uint2   CSR_REG,
+    input   uint8   WDATA,
+    input   uint2   WENABLE,
+    input   uint1   W_FPUFLAGS,
+    input   uint5   IN_FPUFLAGS
+) <reginputs> {
+    uint8   WE_10 <:: ( ( CSR_REG == 1 ) ? CSRf[0,5] : ( CSR_REG == 2 ) ? CSRf[5,3] : CSRf ) | WDATA;
+    uint8   WE_11 <:: ( ( CSR_REG == 1 ) ? CSRf[0,5] : ( CSR_REG == 2 ) ? CSRf[5,3] : CSRf ) & ~WDATA;
+
+    always {
+        if( W_FPUFLAGS ) {
+            CSRf = { CSRf[5,3], IN_FPUFLAGS };
+        } else {
+            switch( CSR_REG ) {
+                case 0: {}
+                case 1: { switch( WENABLE ) {                                                                                   // fflags
+                    case 1: { CSRf[0,5] = WDATA[0,5]; }
+                    case 2: { CSRf[0,5] = WE_10[0,5]; }
+                    case 3: { CSRf[0,5] = WE_11[0,5]; }
+                    default: {}
+                } }
+                case 2: { switch( WENABLE ) {                                                                                   // frm
+                    case 1: { CSRf[5,3] = WDATA[0,3]; }
+                    case 2: { CSRf[5,3] = WE_10[0,3]; }
+                    case 3: { CSRf[5,3] = WE_11[0,3]; }
+                    default: {}
+                } }
+                case 3: { switch( WENABLE ) {                                                                                   // fcsr
+                    case 1: { CSRf = WDATA; }
+                    case 2: { CSRf = WE_10; }
+                    case 3: { CSRf = WE_11; }
+                    default: {}
+                } }
+            }
+        }
+    }
+}
+unit csr_timer(
+    output  uint$CWIDTH$  counter(0)
+) <reginputs> {
+    counter := counter + 1;
+}
+unit csr_counter(
+    output  uint$CWIDTH$  counter(0),
+    input   uint1   trigger
+) <reginputs> {
+    counter := counter + trigger;
+}
+unit csr_counter_add(
+    output  uint$CWIDTH$  counter(0),
+    input   uint3   add
+) <reginputs> {
+    counter := counter + add;
+}
+
+unit CSRblock(
+    input   uint1               START,
+    input   uint12              CSR_REG,
+    input   uint3               function3,
+    input   uint5               rs1,
+    input   uint64              I1,
+    input   uint1               INC_INSNRET,
+    input   uint1               W_FPUFLAGS,
+    input   uint5               IN_FPUFLAGS,
+    output  uint8               OUT_FPUFLAGS,
+    output  uint64              result,
+
+    input   uint$addr_width$    PC_NEXT,
+    input   uint1               CSR_ECALL_REQ,
+    input   uint1               IRQ_ACK,
+    output  uint1               IRQ_ACK_ACK,
+    input   uint1               IRQ_END,
+    output  uint1               IRQ_END_ACK,
+    output  uint1               IRQ_PENDING,
+    input   uint1               IRQ_VBLANK,
+    input   uint$CWIDTH$        IRQ_TIMER,
+    input   uint1               TIMER_VALID,
+    input   uint$CWIDTH$        RDTIME,
+    output  uint$addr_width$    CSR_MEPC,
+    output  uint$addr_width$    CSR_MTVEC,
+    output  uint4               IRQ_VECTOR,
+    input   uint1               DMA_ACTIVE,
+) <reginputs> {
+    uint1               IS_ECALL = 0;
+
+    uint64              WDATA <:: function3[2,1] ? rs1 : I1;                                                            // SWITCH BETWEEN IMMEDIATE OR REGISTER VALUE TO WRITE TO CSR
+    uint2               IRQ_TRIGGERS <:: { IRQ_VBLANK, ( RDTIME == IRQ_TIMER ) & TIMER_VALID } & CSR_MIE;                       // { VBLANK, TIMER == COMPARATOR }
+
+    uint2               CSR_MSTATUS = 2b00;                                                                                     // BITS {  7, 3 }
+    uint2               MSTATUS_NEXT <:: ( function3[0,2] == 2b01 ) ?                { WDATA[7,1], WDATA[3,1] } :
+                                         ( function3[0,2] == 2b10 ) ? CSR_MSTATUS |  { WDATA[7,1], WDATA[3,1] } :
+                                                                      CSR_MSTATUS & ~{ WDATA[7,1], WDATA[3,1] };
+    uint2               CSR_MIE = 2b00;                                                                                         // BITS { 11, 7 }
+    uint2               MIE_NEXT <:: ( function3[0,2] == 2b01 ) ?            { WDATA[11,1], WDATA[7,1] } :
+                                     ( function3[0,2] == 2b10 ) ? CSR_MIE |  { WDATA[11,1], WDATA[7,1] } :
+                                                                  CSR_MIE & ~{ WDATA[11,1], WDATA[7,1] };
+
+
+    uint2               CSR_MIP = 2b00;                                                                                         // BITS { 11, 7 }
+    uint2               MIP_NEXT <:: ( START & ( CSR_REG == 12h344 ) & |function3[0,2] ) ?                                      // UPDATE PENDING INTERRUPT FLAG MIP
+                                        ( function3[0,2] == 2b01 ) ? { WDATA[11,1], WDATA[7,1] } :
+                                        ( function3[0,2] == 2b10 ) ? { CSR_MIP[1,1] | IRQ_TRIGGERS[1,1], CSR_MIP[0,1] | IRQ_TRIGGERS[0,1] } | { WDATA[11,1], WDATA[7,1] } :
+                                                                     { CSR_MIP[1,1] | IRQ_TRIGGERS[1,1], CSR_MIP[0,1] | IRQ_TRIGGERS[0,1] } & ~{ WDATA[11,1], WDATA[7,1] } :
+                                                                     { CSR_MIP[1,1] | IRQ_TRIGGERS[1,1], CSR_MIP[0,1] | IRQ_TRIGGERS[0,1] };
+
+    uint64              CSR_MSCRATCH = uninitialised;                                                                           // 64 BIT SCRATCH REGISTER
+    uint64              MSCRATCH_NEXT <:: ( function3[0,2] == 2b01 ) ? WDATA :
+                                          ( function3[0,2] == 2b10 ) ? CSR_MSCRATCH | WDATA :
+                                                                       CSR_MSCRATCH & ~WDATA;
+
+    uint4               CSR_MCAUSE = uninitialised;                                                                             // == 3 software, == 7 timer, == 11 external (vblank)
+    uint4               MCAUSE_NEXT <:: ( function3[0,2] == 2b01 ) ? WDATA :
+                                        ( function3[0,2] == 2b10 ) ? CSR_MCAUSE | WDATA :
+                                                                     CSR_MCAUSE & ~WDATA;
+
+    uint$addr_width$    MEPC_NEXT <:: ( function3[0,2] == 2b01 ) ? WDATA :
+                                      ( function3[0,2] == 2b10 ) ? CSR_MEPC | WDATA :
+                                                                   CSR_MEPC & ~WDATA;
+
+    uint$addr_width$    MTVEC_NEXT <:: ( function3[0,2] == 2b01 ) ? WDATA :
+                                       ( function3[0,2] == 2b10 ) ? CSR_MTVEC | WDATA :
+                                                                    CSR_MTVEC & ~WDATA;
+
+
+    csr_counter_add INSTRET( add <: INC_INSNRET );                                                                              // INSTRUCTIONS RETIRED
+    csr_counter HART();
+
+    csrf CSRF( CSR_REG <: CSR_REG[0,2], WDATA <: WDATA, CSRf :> OUT_FPUFLAGS, IN_FPUFLAGS <: IN_FPUFLAGS, W_FPUFLAGS <: W_FPUFLAGS );
+    CSRF.WENABLE := 0;                                                                                                          // WRITE TO FCSR FLAG
+
+    HART.trigger := ~DMA_ACTIVE;
+
+    IS_ECALL := CSR_ECALL_REQ ? 1 : IS_ECALL;
+    IRQ_PENDING := CSR_MSTATUS[0,1] & |( CSR_MIE & CSR_MIP );                                                                   // FLAG TO CPU THAT AN IRQ IS PENDING
+    IRQ_VECTOR := IS_ECALL ? 3 : CSR_MIP[0,1] ? 7 : 11;                                                                         // FLAG THE IRQ VECTOR IF VECTORED INTERRUPTS
+    IRQ_ACK_ACK := 0; IRQ_END_ACK := 0;
+
+    always {
+        uint1   WAIT_IRQ_END = uninitialised;
+
+        if( START ) {
+            result = 0;                                                                                                         // PERFORM READ, DEFAULT 0
+
+            switch( CSR_REG[8,4] ) {
+                case 4h0: { switch( CSR_REG[0,2] ) {
+                    case 2h1: { result = CSRF.CSRf[0,5];  }                                                                     //      001 fflags
+                    case 2h2: { result = CSRF.CSRf[5,3]; }                                                                      //      002 frm
+                    case 2h3: { result = CSRF.CSRf; }                                                                           //      003 fcsr
+                    default: {}
+                } }
+                case 4h3: {
+                    if( CSR_REG[6,1] ) {
+                        switch( CSR_REG[0,4] ) {
+                            case 4h0: { result = CSR_MSCRATCH; }                                                                //      340 MSCRATCH
+                            case 4h1: { result = CSR_MEPC; }                                                                    //      341 MEPC
+                            case 4h2: { result = CSR_MCAUSE; }                                                                  //      342 MCAUSE
+                            case 4h4: { result = { CSR_MIP[1,1], 3b000, CSR_MIP[0,1], 7b0000000 }; }                            //      344 MIP
+                            default: {}
+                        }
+                    } else {
+                        switch( CSR_REG[0,4] ) {
+                            case 4h0: { result = { CSR_MSTATUS[1,1], 3b000, CSR_MSTATUS[0,1], 3b000 }; }                        //      300 MSTATUS [3] MIE [7] MPIE
+                            case 4h1: { result = $CPUISA$; }                                                                    //      301 MISA
+                            case 4h4: { result = { CSR_MIE[1,1], 3b000, CSR_MIE[0,1], 7b0000000 }; }                            //      304 MIE
+                            case 4h5: { result = CSR_MTVEC; }                                                                   //      305 MTVEC
+                            default: {}
+                        }
+                    }
+                }
+                case 4hc: { switch( CSR_REG[0,3] ) {
+                    case 3h0: { result = HART.counter; }                                                                        //      C00 CYCLES PER HART
+                    case 3h1: { result = RDTIME; }                                                                              //      C01 TOTAL CYCLES
+                    case 3h2: { result = INSTRET.counter; }                                                                     //      C02 INSTRUCTIONS RETIRED PER HART
+                    default: {}
+                } }
+                case 4hf: { result = 0; }                                                                                       //      F00 HART ID
+                default: {}
+            }
+
+            switch( function3[0,2] ) {                                                                                          // PERFORM WRITE SET CLEAR ( on capable registers )
+                case 2b00: {}                                                                                                   //  ECALL / EBREAK ( ignored )
+                default: {                                                                                                      //  CSRRW CSRRS CSRRC
+                    switch( CSR_REG[8,4] ) {
+                        case 4h0: { CSRF.WENABLE = function3[0,2]; }                                                            //      FFLAGS FRM FCSR
+                        case 4h3: {
+                            if( CSR_REG[6,1] ) {
+                                switch( CSR_REG[0,4] ) {
+                                    case 4h0: { CSR_MSCRATCH = MSCRATCH_NEXT; }                                                 //      MSCRATCH
+                                    case 4h1: { CSR_MEPC = MEPC_NEXT; }                                                         //      MEPC
+                                    case 4h2: { CSR_MCAUSE = MCAUSE_NEXT; }                                                     //      MCAUSE
+                                    default: {}
+                                }
+                            } else {
+                                switch( CSR_REG[0,4] ) {
+                                    case 4h0: { CSR_MSTATUS = MSTATUS_NEXT; }                                                   //      MSTATUS
+                                    case 4h4: { CSR_MIE = MIE_NEXT; }                                                           //      MIE
+                                    case 4h5: { CSR_MTVEC = MTVEC_NEXT; }                                                       //      MTVEC
+                                    default: {}
+                                }
+                            }
+                        }
+                        default: {}
+                    }
+                }
+            }
+        } else {
+            if( IRQ_ACK & ~WAIT_IRQ_END ) {                                                                                     // IRQ ACKNOWLEDGE
+                CSR_MEPC = PC_NEXT;                                                                                             //  STORE NEXT PC INSTRUCTION FOR MRET
+                CSR_MCAUSE = IS_ECALL ? 3 : CSR_MIP[0,1] ? 7 : 11;                                                              //  == 3 ECALL, == 7 TIMER, == 11 VBLANK
+                CSR_MSTATUS = { CSR_MSTATUS[0,1], 1b0 };                                                                        //  STORE AND CLEAR MIE, MIE -> MPIE
+                IRQ_ACK_ACK = 1; WAIT_IRQ_END = 1;
+                IS_ECALL = 0;
+            } else {
+                if( IRQ_END & WAIT_IRQ_END ) {                                                                                  // IRQ END
+                    CSR_MSTATUS = { 1b0, CSR_MSTATUS[1,1] };                                                                    //  RESTORE MIE, MPIE -> MIE
+                    CSR_MCAUSE = 0;                                                                                             //  CLEAR MCAUSE
+                    IRQ_END_ACK = 1; WAIT_IRQ_END = 0;
+                }
+            }
+        }
+
+        CSR_MIP = MIP_NEXT;
+
+        if( reset ) { WAIT_IRQ_END = 0; }
+    }
+}
+
+// Rob Shelton ( @robng15 Twitter, @rob-ng15 GitHub )
+// Simple 16/32/64 bit FPU calculation/conversion routines
+// Designed for as small as FPGA usage as possible,
+// not for speed.
+//
+// Copyright (c) 2021 Rob Shelton
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+// Donated to Silice by @sylefeb
+// MIT license, see LICENSE_MIT in Silice repo root
+//
+// NB: dsh represents the precision of the flaoting-point inputs single == 00, double == 01, half == 10
+//     as per the Risc-V FUNCTION7[0,2] bits
+// NB: All calculations and conversions expect to receive repackaged floating-point inputs.
+//     Half and Single precision floating-point numbers are expanded to fit into the bitfields
+//     of double precision numbers. Repackers are provided to expand/truncate inputs/RESULTs
+//     with nan-boxing of half and single precision numbers.
+// NB: All calculations return their RESULTs in the bitfields of double precision numbers.
+//     These are repackaged in the CPU floating-point controller to their actual format.
+// NB: The floating-point exponent bias is generated in the CPU floating-point controller
+//     and passed to those operations which require it.
+// NB: rm represents the rounding mode, RTE(000) RTZ(001) RDN(010) RUP(011) RMM(100) are supported.
+// NB: The F1_TYPE/F2_TYPE/F3_TYPE inputs detect exception inputs for each of the input registers,
+//     and are 4 bits each for { infinity, signalling NAN, quiet NAN, ZERO } and will signal a
+//     NAN if a half or single precision input is not nan-boxed.
+// NB: subnormal inputs are presently detected and treated as zero.
+// NB: Error states are those required by Risc-V floating point
+
+// IDENTIFY { zero fraction, infinity, signalling NAN, quiet NAN, ZERO } CHECKS FOR NAN-BOXING OF FLOAT
+unit typeF(
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF
+    input   uint64  a,                                                                                                          // REGISTER VALUE TO CHECK
+    output  uint5   type                                                                                                        // { ZF INF sNAN qNAN ZERO } OF INPUT REGISTER
+) <reginputs> {
+    uint1               ZF <:: ~|( dsh[0,1] ? fp64(a).fraction : dsh[1,1] ? fp16(a).fraction : fp32(a).fraction );              // FRACTION == 0
+    uint1               expFF <:: &( dsh[0,1] ? fp64(a).exponent : dsh[1,1] ? fp16(a).exponent : fp32(a).exponent );            // CHECK FOR EXP == ALL 1s ( signals INF/NAN )
+    uint1               exp00 <:: ~|( dsh[0,1] ? fp64(a).exponent : dsh[1,1] ? fp16(a).exponent : fp32(a).exponent );           // CHECK FOR EXP == ALL 0s ( signals ZERO/SUBNORMAL )
+    uint6               MSB[4] = { 22, 51, 9, -1 };                                                                             // POSITION OF THE MSB OF THE FRACTION
+
+    type := dsh[0,1] | ( ~dsh[0,1] & &( dsh[1,1] ? a[16,48] : a[32,32] ) ) ? {                                                  // IF DOUBLE, OR NAN-boxed SINGLE/HALF, SPECIFY TYPE
+                                                                                ZF,
+                                                                                expFF & ZF,                                     // INF
+                                                                                expFF & ~fp64(a).fraction[MSB[dsh],1] & ~ZF,    // sNAN
+                                                                                expFF & fp64(a).fraction[MSB[dsh],1],           // qNAN
+                                                                                exp00                                           // ZERO / SUBNORMAL
+                                                                             } : 5b00010;                                       // SINGLE/HALF NOT BOXED, ISSUE qNAN
+}
+
+// EXECPTION RETURN VALUES signed infinity, signalling NAN, quiet NAN, signed zero
+// RETURN VALUES IN _wide repacked format
+unit wide_special(
+    input   uint1   sign,
+    output  uint64  xINF,
+    output  uint64  sNAN,
+    output  uint64  qNAN,
+    output  uint64  xZERO
+) <reginputs> {
+    xINF :=  { sign, 63h7FF0000000000000 };
+    sNAN :=          64h7FF4000000000000;
+    qNAN :=          64h7FF8000000000000;
+    xZERO := { sign, 63h0 };
+}
+unit wide_xINF(
+    input   uint1   sign,
+    output  uint64  value
+) <reginputs> {
+    value := { sign, 63h7FF0000000000000 };
+}
+unit wide_xZERO(
+    input   uint1   sign,
+    output  uint64  value
+) <reginputs> {
+    value := { sign, 63h0 };
+}
+
+// EXECPTION RETURN VALUES signed infinity, signalling NAN, quiet NAN, signed zero
+// RETURN VALUES IN _actual format
+unit actual_special(
+    input   uint2   dsh,
+    input   uint1   sign,
+    output  uint64  xINF,
+    output  uint64  sNAN,
+    output  uint64  qNAN,
+    output  uint64  xZERO
+) <reginputs> {
+    xINF :=  dsh[0,1] ? { sign, 63h7FF0000000000000 } : dsh[1,1] ? { 48hffffffffffff, sign, 15h7C00 } : { 32hffffffff, sign, 31h7f800000 };
+    sNAN :=  dsh[0,1] ?           64h7FF4000000000000 : dsh[1,1] ?                64hffffffffffff7d00 :                64hffffffff7fa00000;
+    qNAN :=  dsh[0,1] ?           64h7FF8000000000000 : dsh[1,1] ?                64hffffffffffff7e00 :                64hffffffff7fc00000;
+    xZERO := dsh[0,1] ? { sign,                63h0 } : dsh[1,1] ? { 48hffffffffffff, sign,    15b0 } : { 32hffffffff, sign,        31h0 };
+}
+unit actual_qNAN(
+    input   uint2   dsh,
+    output  uint64  value
+) <reginputs> {
+    value := dsh[0,1] ? 64h7FF8000000000000 : dsh[1,1] ? 64hffffffffffff7e00 : 64hffffffff7fc00000;
+}
+unit actual_xZERO(
+    input   uint2   dsh,
+    input   uint1   sign,
+    output  uint64  value
+) <reginputs> {
+    value := dsh[0,1] ? { sign, 63h0 } : dsh[1,1] ? { 48hffffffffffff, sign, 15b0 } : { 32hffffffff, sign, 31h0 };
+}
+
+// REPACKERS, ALL FLOATING POINT NUMBERS ARE PASSED TO CALCULATIONS IN THE BITFIELD OF A DOUBLE TO ALLOW EASIER EXTRACTION OF THE SIGN, EXPONENT AND FRACTIONS
+// _WIDE, copies double to double, single/half to the bitfields of a double
+// _ACTUAL, copies double to double, a repacked wide single/half to the bitfields of a single/half
+unit repackage_actual(                                                                                                          // REPACKAGE A DOUBLE/SINGLE/HALF FROM THE BITFIELDS OF A DOUBLE
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint64  a,                                                                                                          // FLOATING POINT SOURCE REGISTER
+    output  uint64  repack                                                                                                      // REPACKED FLOATING POINT REGISTER
+) <reginputs> {
+    repack := dsh[0,1] ? a :                                                                                                    // RETURN DOUBLE UNCHANGED
+              dsh[1,1] ? { 48hffffffffffff, fp64( a ).sign, fp64( a ).exponent[0,5], fp64( a ).fraction[42,10] } :              // RETURN HALF REPACKED ( NANboxed )
+                         {     32hffffffff, fp64( a ).sign, fp64( a ).exponent[0,8], fp64( a ).fraction[29,23] };               // RETURN SINGLE REPACKED ( NANboxed )
+}
+
+unit repackage_wide(                                                                                                            // REPACKAGE A DOUBLE/SINGLE/HALF INTO THE BITFIELDS OF A DOUBLE
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint64  a,                                                                                                          // FLOATING POINT SOURCE REGISTER
+    output  uint64  repack                                                                                                      // REPACKED FLOATING POINT REGISTER
+) <reginputs> {
+    repack := dsh[0,1] ? a :                                                                                                    // RETURN DOUBLE UNCHANGED
+              dsh[1,1] ? { fp16( a ).sign, 6b0, fp16( a ).exponent, fp16( a ).fraction, 42b0 } :                                // RETURN HALF REPACKED
+                         { fp32( a ).sign, 3b0, fp32( a ).exponent, fp32( a ).fraction, 29b0 };                                 // RETURN SINGLE REPACKED
+}
+
+unit make_wide(                                                                                                                 // REPACKAGE A DOUBLE/SINGLE/HALF INTO THE BITFIELDS OF A DOUBLE
+    input   uint1   sign,                                                                                                       // SIGN
+    input   uint11  exp,                                                                                                        // EXPONENT
+    input   uint52  fraction,                                                                                                   // FRACTION
+    output  uint64  wide                                                                                                        // PACKED INTO DOUBLE BITFIELDS
+) <reginputs> {
+    wide := { sign, exp, fraction };                                                                                            // PACK SIGN, EXPONENT AND FRACTION INTO DOUBLE BITFIELDS
+}
+
+unit make_actual(                                                                                                               // REPACKAGE A DOUBLE/SINGLE/HALF FROM THE BITFIELDS OF A DOUBLE
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint1   sign,                                                                                                       // SIGN
+    input   uint11  exp,                                                                                                        // EXPONENT
+    input   uint52  fraction,                                                                                                   // FRACTION
+    output  uint64  repack                                                                                                      // REPACKED FLOATING POINT REGISTER
+) <reginputs> {
+    repack := dsh[0,1] ? { sign, exp, fraction } :                                                                              // RETURN DOUBLE UNCHANGED
+              dsh[1,1] ? { 48hffffffffffff, sign, exp[0,5], fraction[42,10] } :                                                 // RETURN HALF REPACKED ( NANboxed )
+                         {     32hffffffff, sign, exp[0,8], fraction[29,23] };                                                  // RETURN SINGLE REPACKED ( NANboxed )
+}
+
+// NORMALISE A 106 BIT MANTISSA SO THAT THE MSB IS ONE, FOR ADDSUB ALSO DECREMENT THE EXPONENT FOR EACH SHIFT LEFT
+// EXTRACT THE 53 BITS FOLLOWING THE MSB (1.xxxx) FOR ROUNDING
+unit clz106(
+    input   uint106  bitstream,
+    output  uint7   count
+) <reginputs> {
+    uint3               mask <:: { |bitstream[104,2], |bitstream[96,8], |bitstream[64,32] };                                    // FLAG PARTS THAT CONTAIN A 1 { [104,2], [96,8], [64,32] }
+
+    always {
+        uint2   clz_3 = uninitialised;
+        uint4   clz_2 = uninitialised;
+        uint6   clz_1 = uninitialised;
+        uint7   clz_0 = uninitialised;
+
+        ( clz_3 ) =  clz_silice_2( bitstream[104, 2] );                                                                         // CLZ FOR BITS 104 - 105
+        ( clz_2 ) =  clz_silice_8( bitstream[ 96, 8] );                                                                         // CLZ FOR BITS  96 - 103
+        ( clz_1 ) = clz_silice_32( bitstream[ 64,32] );                                                                         // CLZ FOR BITS  64 -  95
+        ( clz_0 ) = clz_silice_64( bitstream[  0,64] );                                                                         // CLZ FOR BITS   0 -  63
+
+        count = ( mask[2,1] ? clz_3 : mask[1,1] ? clz_2 : mask[0,1] ? clz_1 : clz_0 ) +                                         // COUNT LEADING ZEROS FOR NORMALISATION SHIFT
+                ( mask[2,1] ?     0 : mask[1,1] ?     2 : mask[0,1] ?    10 :    42 );                                          // ADD ON AMOUNT IN PRIOR SECTIONS IF APPLICABLE
+    }
+}
+
+unit donormalexp(
+    input   int13   exp,                                                                                                        // EXPONENT FROM ADDITION / SUBTRACTION
+    input   uint106 bitstream,                                                                                                  // RESULT FROM CALCULATION
+    output  int13   newexponent,                                                                                                // ADJUSTED EXPONENT FOR ADDITION / SUBTRACTION
+    output  uint53  normalfraction                                                                                              // NORMALISED FRACTION 1.xxx
+) <reginputs> {
+    uint106             temporary <:: ( bitstream << CLZ.count );                                                               // SHIFT FRACTION LEFT SO 1.xxxx
+    clz106 CLZ( bitstream <: bitstream );                                                                                       // COUNT LEADING ZEROS
+
+    normalfraction := temporary[ 52, 53 ];                                                                                      // EXTRACT 53 BITS ( 1 extra for rounding )
+    newexponent := exp - CLZ.count;                                                                                             // ADDSUB EXPONENT ADJUSTMENT
+}
+
+// ROUND 52 ( double ) 23 ( single ) 11 ( half ) BIT FRACTION FROM NORMALISED FRACTION USING NEXT TRAILING BIT
+// ADD BIAS TO EXPONENT AND ADJUST EXPONENT IF ROUNDING FORCES
+// COMBINE COMPONENTS TO FLOATING POINT NUMBER IN DOUBLE BITFIELDS  - USED BY CALCULATIONS
+// UNDERFLOW return 0, OVERFLOW return infinity
+unit doroundcombine(
+    input   uint2   rm,                                                                                                         // ROUNDING MODE ( RNE OR RTZ SUPPORTED )
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint10  BIAS,                                                                                                       // FLOATING POINT BIAS FOR DESTINATION DOUBLE/SINGLE/HALF
+    input   uint1   sign,                                                                                                       // RESULT SIGN
+    input   uint53  bitstream,                                                                                                  // NORMALISED BITSTREAM 1.xxxx
+    input   int13   exponent,                                                                                                   // EXPONENT ( no bias )
+    output  uint1   OF,                                                                                                         // OVERFLOW FLAG
+    output  uint1   UF,                                                                                                         // UNDERFLOW FLAG
+    output  uint64  combined                                                                                                    // COMBIUNED DOUBLE/SINGLE/HALF ROUNDED AND COMBINED
+) <reginputs> {
+    uint1               RM_ACTION <:: ( rm == $RNE$ ) ? 1 :                                                                     // RNE
+                                      ( rm == $RTZ$ ) ? 0 :                                                                     // RTZ
+                                      ( rm == $RDN$ ) ? sign :                                                                  // RDN
+                                                       ~sign;                                                                   // RUP
+
+    uint6               RB[4] = { 29, 0, 42, -1 };                                                                              // POSITION OF THE ROUNDING BIT IN BITSTREAM
+    uint53              roundedfraction <:: bitstream[1,52] + ( ( bitstream[RB[dsh],1] & RM_ACTION ) << RB[dsh] );              // EXTRACT 52 BITS AND + ROUNDING BIT ( 53 bits to detect overflow )
+    int13               newexponent <:: BIAS + exponent + roundedfraction[52,1];                                                // CREATE EXPONENT BY ADDING BIAS AND OVERFLOW
+    uint1               expOF <:: __signed( newexponent ) > __signed( { 2b0, BIAS, 1b0 } );                                     // OVERFLOW IF EXPONENT IS GREATER THAN ( 2 * BIAS )
+    make_wide COMBINED( sign <: sign, exp <: newexponent[0,11], fraction <: roundedfraction[0,52] );                            // MAKE COMBINED RESULT IN DOUBLE BITFIELDS
+    wide_xINF xINF( sign <: sign ); wide_xZERO xZERO( sign <: sign );                                                           // SIGNED INFINITY RETURN VALUE, SIGNED ZERO RETURN VALUE
+
+    OF := expOF;
+    UF := newexponent[12,1];                                                                                                    // UNDERFLOW IF EXPONENT IS STILL NEGATIVE AFTER BIAS ADDED
+    combined := newexponent[12,1] ? xZERO.value :                                                                               // UNDERFLOW RETURN SIGNED ZERO
+                            expOF ? xINF.value :                                                                                //  OVERFLOW RETTURN SIGNED INFINITY
+                                    COMBINED.wide;                                                                              //  ELSE COMBINED
+}
+
+// CONVERSIONS TO HANDLE FCVT.dest.source
+unit clz64(
+    input   uint64  number,
+    output  uint64  shift,
+    output  uint7   zeros
+) <reginputs> {
+    always {
+        ( zeros ) = clz_silice_64( number );
+        shift = number << zeros;
+    }
+}
+unit intlong2float(                                                                                                             // 32/64 BIT INTEGER TO 16/32/64 BIT FLOATING POINT
+    input   uint2   RMODE,                                                                                                      // ROUNDING MODE
+    input   uint1   dounsigned,                                                                                                 // UNSIGNED CONVERSION FLAG
+    input   uint1   il,                                                                                                         // FROM INTEGER == 0 OR LONG == 1
+    input   uint2   dsh,                                                                                                        // TO DOUBLE == 01 SINGLE == 00 HALF == 10
+    input   uint10  BIAS,                                                                                                       // BIAS FOR DOUBLE/SINGLE/HALF
+    input   uint6   MB,                                                                                                         // POSITION OFF THE ROUNDING BIT IN THE FRACTIONAL PART
+    input   uint64  I1,                                                                                                        // REGISTER VALUE TO CONVERT
+    input   uint32  I1_ABS32,                                                                                                  // 32 bit ABSOLUTE VALUE
+    input   uint64  I1_ABS64,                                                                                                  // 64 bit ABSOLUTE VALUE
+    output  uint64  RESULT,                                                                                                     // RESULTING DOUBLE/SINGLE/HALF
+    output  uint1   OP_FPUFLAGS                                                                                                 // FPU FLAG
+) <reginputs> {
+    uint1               sign <:: ~dounsigned & I1[ { il, 5b11111 }, 1 ];                                                       // EXTRACT SIGN IF SIGNED CONVERSION
+
+    uint1               RM_ACTION <:: ( RMODE == $RNE$ ) ? 1 :                                                                  // RNE
+                                      ( RMODE == $RTZ$ ) ? 0 :                                                                  // RTZ
+                                      ( RMODE == $RDN$ ) ? sign :                                                               // RDN
+                                                          ~sign;                                                                // RUP
+
+    uint64              number <:: il ? sign ? I1_ABS64 : I1 : sign ? I1_ABS32 : I1[0,32];                                  // EXTRACT ABSOLUTE VALUE
+    clz64 CLZ( number <: number );                                                                                              // COUNT LEADING ZEROS
+
+    uint6               RB[4] = { 39, 10, 52, -1 };                                                                             // POSITION OF THE ROUNDING BIT
+    uint53              roundedfraction <:: CLZ.shift[11,52] + ( ( CLZ.shift[RB[dsh],1] & RM_ACTION ) << MB );                  // GENERATE ROUNDED FRACTION, EXTRACT 52 BITS ADD ROUNDING MASK
+    uint11              exponent <:: 63 + BIAS - CLZ.zeros + roundedfraction[52,1];                                             // GENERATE EXPONENT AND ADD BIAS + 63 - CLZ + OVERFLOW
+    make_actual TOFLOAT(                                                                                                        // PACKAGE COMPONENTS INTO FLOATING-POINT BITFIELDS ( NAN BOXED )
+        dsh <: dsh,
+        sign <: sign, exp <: exponent[0,11], fraction <: roundedfraction[0,52]
+    );
+    actual_special SPECIAL( dsh <: dsh );                                                                                       // INF/ZERO RETURN VALUE FOR DOUBLE/SINGLE/HALF
+
+    uint6               IX[4] = { 40, 11, 53, -1 };                                                                             // MAXIMUM NUMBER OF FRACTION BITS
+    uint1               zlt <:: ( __unsigned( CLZ.zeros )  < __unsigned( IX[dsh] ) );                                           // CHECK IF INEXACT, TOO MANY BITS
+    uint1               HALF_OF <:: dsh[1,1] & ( __unsigned ( il ? I1_ABS64 : I1_ABS32 ) > __unsigned( 65504 ) );             // DETECT OVERFLOW IF HALF PRECISION
+
+    RESULT :=  ~|( il ? I1 : I1[0,32] ) ? SPECIAL.xZERO :                                                                     // RETURN ZERO
+                                  HALF_OF ? SPECIAL.xINF :                                                                      //  OR HALF OVERFLOW -> +/- INFINITY
+                                            TOFLOAT.repack;                                                                     //  OR FLOATING-POINT CONVERSION
+    OP_FPUFLAGS := dsh[0,1] ? ( il ? zlt : 0 ) : zlt;                                                                           // FLAGS NOT EXACT, TOO MANY BITS
+}
+
+unit float2intlong(                                                                                                             // 16/32/64 BIT FLOATING POINT TO 32/64 BIT INTEGER
+    input   uint1   RM_ACTION,                                                                                                  // ROUNDING MODE BIT MASK
+    input   uint1   dounsigned,                                                                                                 // UNSIGNED CONVERSION FLAG
+    input   uint1   domod,                                                                                                      // FCVTMOD.W.D FLAG
+    input   uint1   il,                                                                                                         // TO INTEGER == 0 OR LONG == 1
+    input   uint10  BIAS,                                                                                                       // BIAS FOR DOUBLE/SINGLE/HALF
+    input   uint64  F1_X,                                                                                                      // REGISTER VALUE TO CONVERT ( repacke into double bitfields )
+    input   uint4   F1_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } OF INPUT REGISTER
+    input   int13   EXP,                                                                                                        // EXPONENT WITH BIAS REMOVED
+    output  uint64  RESULT,                                                                                                     // RESULTING LONG OR INTEGER
+    output  uint5   OP_FPUFLAGS                                                                                                 // FPU FLAGS
+) <reginputs> {
+    uint1               NV <:: ( __signed( EXP ) > __signed( { 1b0, il, 4b1111, dounsigned } ) ) |                              // INVALID IF TOO LARGE
+                               ( dounsigned & fp64( F1_X ).sign );                                                             //  OR UNSIGNED AND NEGATIVE
+    uint65              fraction <:: { 1b1, fp64( F1_X ).fraction, 12b0 } >> ( 63 - EXP );                                     // EXTRACT FRACTION AND EXTEND TO 65 BITS, SHIFT INTO POSITION
+    uint64              unsignedfraction <:: ( il ? fraction[1,64] : fraction[1,32] ) + ( fraction[0,1] & RM_ACTION );          // GENERATE ROUNDED 32/64 bit ABSOLUTE INTEGER
+    uint64              neg_64 <:: -unsignedfraction;
+    uint32              neg_32 <:: -unsignedfraction[0,32];
+    uint64              min <:: il ? dounsigned ?                   0 : 64h8000000000000000 : 64hffffffff80000000;              // MINIMUM NEGATIVE INTEGER OR 0 FOR UNSIGNED
+    uint64              max <:: il ? dounsigned ? 64hffffffffffffffff : 64h7fffffffffffffff : 64h000000007fffffff;              // MAXIMUM POSITIVE INTEGER
+
+    OP_FPUFLAGS := { NV, 4b0000 };                                                                                              // RETURN FLAGS
+
+    RESULT :=      F1_TYPE[0,1] | ~|unsignedfraction ? 0 :                                                                     // 0 INPUT ( OR INTEGER BECOMES ZERO )
+                                       |F1_TYPE[1,2] ? max :                                                                   // NAN INPUT
+                                        F1_TYPE[3,1] ? fp64( F1_X ).sign ? min : max :                                        // INF INPUT
+                                      dounsigned ? NV ? { {64{~fp64( F1_X ).sign}} } : unsignedfraction :                      // 0 OR MAX IF NV ELSE RETURN UNSIGNED FRACTION
+                                                   NV ? fp64( F1_X ).sign ? min : max :                                        // MIN/MAX FOR SIGNED OUT OF RANGE
+                                                   il ? fp64( F1_X ).sign ? neg_64 : unsignedfraction :                        // RETURN CORRECTLY SIGNED RESULT
+                                                domod ? fp64( F1_X ).sign ? { 32hffffffff, neg_64[0,32] } :                    // FCVTMOD.W.D, ONLY USE 32 BITS AND SIGN EXTEND
+                                                                             { {32{unsignedfraction[31,1]}}, unsignedfraction[0,32] } :
+                                   fp64( F1_X ).sign ? { 32hffffffff, neg_32 } :                                               // IF SIGN, SIGN EXTEND 32 BIT INTEGER
+                                                        unsignedfraction[0,32];                                                 //  ELSE COPY 32 BIT NUMBER
+}
+
+unit floatchangeprecision(                                                                                                      // DOUBLE/SINGLE/HALF <-> DOUBLE/SINGLE/HALF ( EXTEND/TRUNCATE )
+    input   uint1   RM_ACTION,                                                                                                  // ROUNDING MODE BIT MASK
+    input   uint2   dest,                                                                                                       // TO DOUBLE(01)/SINGLE(00)/HALF(10)
+    input   uint10  DBIAS,                                                                                                      // BIAS FOR DOUBLE/SINGLE/HALF DESTINATION
+    input   uint2   source,                                                                                                     // FROM DOUBLE(01)/SINGLE(00)/HALF(10)
+    input   uint10  SBIAS,                                                                                                      // BIAS FOR DOUBLE/SINGLE/HALF SOURCE
+    input   uint6   MB,                                                                                                         // POSITION OFF THE ROUNDING BIT IN THE FRACTIONAL PART
+    input   uint64  F1_X,                                                                                                      // REGISTER VALUE TO EXTEND / TRUNCATE ( in double bitfields )
+    input   uint4   F1_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO }
+    output  uint64  RESULT,                                                                                                     // EXTENDED OR TRUNCATED RESULT
+    output  uint3   OP_FPUFLAGS                                                                                                 // FPU FLAGS
+) <reginputs> {
+    uint1               roundbit <:: ( dest[0,1] ? 0 :                                                                          // EXTRACT ROUNDING BIT AND SET IF ROUNDING MODE
+                                       dest[1,1] ? fp64( F1_X ).fraction[41,1] :
+                                                   fp64( F1_X ).fraction[28,1] ) & RM_ACTION;
+    uint53              roundedfraction <:: fp64( F1_X ).fraction + ( roundbit << MB );                                        // EXTRACT FRACTION + ROUNDING MASK, 53 BITS TO DETECT OVERFLOW
+    int13               exp <:: fp64( F1_X ).exponent - SBIAS + DBIAS + roundedfraction[52,1];                                 // SELECT EXPONENT AND - SOURCE BIAS, + DESTINATION BIAS + OVERFLOW
+    uint1               truncateOF <:: __signed( exp ) > __signed( { 2b0, DBIAS, 1b0 });                                        // CHECK IF EXPONENT IS TOO LARGE ( > 2*BIAS for single/half)
+    make_actual REPACK(                                                                                                         // PACKAGE COMPONENTS INTO FLOATING-POINT BITFIELDS WITH NAN-BOXING
+        dsh <: dest,
+        sign <:  fp64( F1_X ).sign, exp <: exp[0,11], fraction <: roundedfraction[0,52]
+    );
+    actual_special SPECIAL( dsh <: dest[0,2], sign <: fp64( F1_X ).sign );                                                     // GENERATE xINF, sNAN, qNAN, xZERO FOR DESTINATION FORMAT
+
+    OP_FPUFLAGS := |F1_TYPE ? 0 : { truncateOF, exp[12,1], source[0,1] | ( ~|source & dest[1,1] ) };                           // NOT EXACT IF D -> S/H OR S -> H (need to check dropped bits)
+
+    RESULT := F1_TYPE[0,1] ? SPECIAL.xZERO :
+              F1_TYPE[1,1] ? SPECIAL.qNAN :
+              F1_TYPE[2,1] ? SPECIAL.sNAN :
+              F1_TYPE[3,1] ? SPECIAL.xINF :
+                              truncateOF ? SPECIAL.xINF : exp[12,1] ? SPECIAL.xZERO : REPACK.repack;                            // OF -> INF, UF -> ZERO, ELSE REPACK
+}
+
+unit floatround(                                                                                                                // 16/32/64 BIT FLOATING POINT ROUND ( CONVERT TO NEAREST INTEGER )
+    input   uint1   RM_ACTION,                                                                                                  // ROUNDING MODE BIT MASK
+    input   uint2   dsh,                                                                                                        // TO DOUBLE == 01 SINGLE == 00 HALF == 10
+    input   uint1   NX,
+    input   uint10  BIAS,                                                                                                       // BIAS FOR DOUBLE/SINGLE/HALF
+    input   uint6   MB,                                                                                                         // POSITION OFF THE ROUNDING BIT IN THE FRACTIONAL PART
+    input   uint64  F1,
+    input   uint64  F1_X,                                                                                                      // REGISTER VALUE TO CONVERT ( repacke into double bitfields )
+    input   uint4   F1_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } OF INPUT REGISTER
+    input   int13   EXP,                                                                                                        // EXPONENT WITH BIAS REMOVED
+    output  uint64  RESULT,                                                                                                     // RESULTING LONG OR INTEGER
+    output  uint1   OP_FPUFLAGS                                                                                                 // FPU FLAGS
+) <reginputs> {
+    uint1               NV <:: ( __signed( EXP ) > __signed( 63 ) );                                                            // INVALID IF TOO LARGE
+    uint65              in_fraction <:: { 1b1, fp64( F1_X ).fraction, 12b0 } >> ( 63 - EXP );                                  // EXTRACT FRACTION AND EXTEND TO 65 BITS, SHIFT INTO POSITION
+    uint64              unsignedinteger <:: in_fraction[1,64] + ( in_fraction[0,1] & RM_ACTION );                               // GENERATE ROUNDED 64 bit ABSOLUTE INTEGER
+    clz64 CLZ( number <: unsignedinteger );                                                                                     // COUNT LEADING ZEROS
+
+    uint6               RB[4] = { 39, 10, 52, -1 };                                                                             // POSITION OF THE ROUNDING BIT
+    uint53              roundedfraction <:: CLZ.shift[11,52] + ( ( CLZ.shift[RB[dsh],1] & RM_ACTION ) << MB );                  // GENERATE ROUNDED FRACTION, EXTRACT 52 BITS + ROUNDING MASK
+    uint13              exponent <:: 63 + BIAS - CLZ.zeros + roundedfraction[52,1];                                             // GENERATE EXPONENT AND ADD BIAS + 63 - CLZ + OVERFLOW
+    make_actual TOFLOAT(                                                                                                        // PACKAGE COMPONENTS INTO FLOATING-POINT BITFIELDS ( NAN BOXED )
+        dsh <: dsh,
+        sign <: fp64( F1_X ).sign, exp <: exponent[0,11], fraction <: roundedfraction[0,52]
+    );
+    actual_special SPECIAL( dsh <: dsh, sign <: fp64( F1_X ).sign );                                                           // GENERATE xINF, sNAN, qNAN, xZERO FOR DESTINATION FORMAT
+
+    OP_FPUFLAGS := { NX & ( RESULT != F1 ) };                                                                                  // RETURN FLAGS { needs checking }
+
+    RESULT :=                                                ( |F1_TYPE | NV ) ? NV ? SPECIAL.xINF : F1 :                     // SPECIAL OR OVERFLOW
+              ( __signed( exponent - BIAS ) < __signed(0) ) | ~|unsignedinteger ? SPECIAL.xZERO :                               //  IS THE RESULT ZERO?
+                                                                                  TOFLOAT.repack;                               //  RETURN THE REPACKED FLOATING POINT NUMBER
+}
+
+// FUSED MULTIPLY AND ADD ( A*B+C A*B-C -A*B+C -A*B-C )
+//       MULTIPLICATION ( A*B+0.0 )
+//       ADDITION/SUBTRACTION ( A*1.0+B OR A*1.0-B )
+unit do_float_multiply(
+    input   uint10  BIAS,                                                                                                       // FLOATING POINT BIAS
+    input   uint64  F1_X,                                                                                                      // F1 ( repacked in double bitfields )
+    input   uint64  F2_X,                                                                                                      // F2 ( repacked in double bitfields )
+    output  uint1   sign,                                                                                                       // SIGN F1 x F2
+    output  uint106 fraction,                                                                                                   // PRODUCT F1 x F2
+    output  int13   exp                                                                                                         // EXPONENT F1 x F2
+) <reginputs> {
+    fraction := { 1b1, fp64( F1_X ).fraction } * { 1b1, fp64( F2_X ).fraction };                                              // CALCULATE THE PRODUCT BY MUTLIPLYING LEFT ALIGNED FRACTIONS
+    exp := fp64( F1_X ).exponent + fp64( F2_X ).exponent - ( { 2b00, BIAS, 1b0 } ) + fraction[105,1];                         // NEW EXP BY + INPUT EXP, - BIAS(2*) AND ( +1 if overflow )
+    sign := fp64( F1_X ).sign ^ fp64( F2_X ).sign;                                                                            // SIGN FOR PRODUCT (USED FOR QUOTIENT TOO)
+}
+unit do_float_addsub(
+    input   uint1   signA,
+    input   int13   expA,                                                                                                       // EXPONENT OF MULTIPLICATION ( may be out of normal range )
+    input   uint106 fractionA,                                                                                                  // RESULT OF MULTIPLICATION ( including leading 1 bit )
+    input   uint1   signC,
+    input   int13   expC,                                                                                                       // EXPONENT OF INPUT C ( bias removed )
+    input   uint52  fractionC,                                                                                                  // FRACTION OF INPUT C ( no leading 1 bit )
+    output  uint1   RESULTsign,
+    output  uint13  RESULTexp,
+    output  uint106 RESULTfraction
+) <reginputs> {
+    uint1               expAvexpC <:: ( __signed(expA) < __signed(expC) );                                                      // FIND SMALLEST EXPONENT
+    int13               shift <:: ( expAvexpC ? expC : expA ) - ( expAvexpC ? expA :expC );                                     // FIND THE SHIFT FOR ALIGNMENT
+    uint106             sigA <:: ( fractionA[105,1] ? { 1b0, fractionA[1,105] } : fractionA ) >> ( expAvexpC ? shift : 0 );                          // ALIGN A IF SMALLER
+    uint106             sigC <:: { 2b01, fractionC, 52b0 } >> ( expAvexpC ? 0 : shift );                                                             // GENERATE C FROM FRACTION, ALIGN IF SMALLER
+    uint1               AvB <:: ( __unsigned( sigA ) > __unsigned( sigC ) );                                                    // FIND LARGEST FRACTION ( when exponents are equal )
+    uint1               sign <:: ( signA ^ signC ) ? ( signA ? AvB : ~AvB ) : signA;                                            // DETERMINE RESULT SIGN
+
+    RESULTsign := sign;                                                                                                         // RETURN RESULT SIGN
+    RESULTexp := ( expAvexpC ? expC : expA ) + 1;                                                                                // RESULT EXPONENT IS LARGEST EXPONENT ( +1 FOR OVERFLOW )
+    RESULTfraction := ( signA ^ signC ) ? ( signA ^ sign ? sigC : sigA ) - ( signA ^ sign ? sigA : sigC ) : ( sigA + sigC );    // DIFFERING SIGNS, SUBTRACTION OR SAME SIGNS ADDITION
+}
+unit floatfused(
+    input   uint10  BIAS,                                                                                                       // BIAS FOR DOUBLE/SINGLE/HALF
+    input   uint64  c,                                                                                                          // B INPUT FOR A*B+C and - variations
+    input   uint4   F3_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } FOR C
+    input   uint1   F1_OR_F2_INF,                                                                                               // EITHER A OR B INF?
+    input   uint1   F1_AND_F2_INF,                                                                                              // BOTH A AND B INF?
+    input   uint1   F1_OR_F2_NAN,                                                                                               // EITHER A OR B NAN?
+    input   uint1   F1_OR_F2_ZERO,                                                                                              // EITHER A OR B ZERO?
+    input   uint1   F1_AND_F2_ZERO,                                                                                             // BOTH A AND B ZERO?
+    input   uint1   productsign,                                                                                                // MULTIPLICATION SIGN IN FOR ADD/SUB
+    input   uint106 productfraction,                                                                                            // MULTIPLICATION RESULT IN FOR ADD/SUB
+    input   int13   productexp,                                                                                                 // MULTIPLICATION EXPONENT FOR ADD/SUB
+    input   uint1   OF,
+    input   uint1   UF,
+    output  uint5   flags,                                                                                                      // OPERATION FLAGS
+    output  uint5   special,                                                                                                    // { C, INF, sNAN, qNAN, ZERO }, C+INF = C, INF = +/- INF FROM X
+    output  uint1   SIGN,
+    output  int13   EXP,
+    output  uint106 FRACTION
+) <reginputs> {
+    uint1   ZERO <:: F1_OR_F2_ZERO | F3_TYPE[0,1];                                                                             // DETECT ZERO
+    uint1   IF <:: F1_OR_F2_INF | F3_TYPE[3,1];                                                                                // DETECT INFINITY
+    uint1   NN <:: F1_OR_F2_NAN | |F3_TYPE[1,2];                                                                               // DETECT NAN
+    uint1   NV <:: ( F1_OR_F2_INF & F1_OR_F2_ZERO ) | ( F1_OR_F2_INF & ( F3_TYPE[3,1] & ( productsign ^ fp64( c ).sign ) ) );  // INF*0 INVALID | x == INF | +/- INF WITH DIFFERING SIGNS
+    uint2   ACTION <:: { IF | NN, ZERO };                                                                                       // DO FUSED IF NOT INFINITY, NAN OR ZERO
+
+    do_float_addsub ADDSUB(                                                                                                     // PERFORM THE ADDITION/SUBTRACTION, ACCOUNTING FOR SIGNS
+        signA <: productsign, expA <: productexp, fractionA <: productfraction,                                                 // SPECIAL CASE FOR SUBTRACTION WHEN EQUAL EXPONENTS
+        signC <: fp64( c ).sign, fractionC <: fp64( c ).fraction,                                           // AND SECOND FRACTION IS LARGER THAN THE FIRST
+        RESULTsign :> SIGN, RESULTexp :> EXP, RESULTfraction :> FRACTION
+    );
+
+    ADDSUB.expC := { 2b00, fp64( c ).exponent } - { 3b000, BIAS };                                                      // REMOVE BIAS FROM C INPUT
+
+    always {
+        switch( ACTION ) {
+            case 2b00: { special = |ADDSUB.RESULTfraction ? 5b00000 : 5b00001; }                                                // FUSED IS VALID, CHECK 0 FROM ADDSUB
+            case 2b01: {                                                                                                        // ZERO INPUT
+                special = ( F1_OR_F2_ZERO & F3_TYPE[0,1] ) ? 5b00001 :                                                         // MULTIPLY RESULT 0 AND C == 0, RETURN 0
+                                              F1_OR_F2_ZERO ? 5b10000 :                                                         // MULTIPLICATION INPUTS 0, RETURN C
+                                                              5b00000;                                                          // ADDITION/SUBTRACTION INPUT 0, RETURN MULTIPLICATION RESULT
+
+            }
+            default: {
+                switch( { IF, ZERO } ) {
+                    default: { special = 5b00010; }                                                                             // NAN INPUT
+                    case 2b10: {                                                                                                // NAN OR INFITITY RETURN qNAN OR INFINITY
+                        switch( { F1_OR_F2_INF, F3_TYPE[3,1] } ) {
+                            case 2b01: { special = 5b11000; }                                                                   // C INPUT IS INFINITY
+                            default: { special = NV ? 5b00010 : 5b01000; }                                                      // INVALID MIXED SIGN INFINITY, OR MULTIPLICATION IS INFINITY
+                        }
+                    }
+                    case 2b11: {                                                                                                // INFINITY AND ZERO INPUTS
+                        switch( { F1_OR_F2_INF, F3_TYPE[3,1] } ) {
+                            case 2b01: { special = 5b11000; }                                                                   // MULTIPLICATION IS 0 AND C INPUT IS INFINITY
+                            case 2b10: { special = 5b01000;}                                                                    // MULTIPLICATION IS INFINITY, C INPUT IS 0
+                            default: { special = 5b00010; }                                                                     // INFINITY x ZERO, INVALID qNAN
+                        }
+                    }
+                }
+            }
+        }
+
+        flags = {  NV, 1b0,                                                                                                     // RETURN FLAGS
+            ( ~|ACTION & OF ) | ( ( ACTION == 2b01 ) & ~F1_OR_F2_ZERO & ~F3_TYPE[0,1] & OF ),
+            ( ~|ACTION & UF ) | ( ( ACTION == 2b01 ) & ~F1_OR_F2_ZERO & ~F3_TYPE[0,1] & UF ),
+            1b0
+        };
+    }
+}
+
+// DIVIDE TWO FLOATING POINT NUMBERS
+unit prep_float_divide(
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint64  a,                                                                                                          // A INPUT FOR A/B
+    input   uint64  b,                                                                                                          // B INPUT FOR A/B
+    output  int13   quotientexp,                                                                                                // RESULT EXPONENT
+    output  uint108 sigA,                                                                                                       // DIVIDEND LEFT ALIGNED
+    output  uint106 sigB                                                                                                        // DIVISOR RIGHT ALIGNED
+) <reginputs> {
+    quotientexp := ( fp64( a ).exponent - fp64( b ).exponent ) - ( fp64(b).fraction > fp64(a).fraction );                       // SUBTRACT EXPONENTS FOR RESULT ( -1 if b  > a  )
+    sigA := dsh[0,1] ? { 1b1, fp64(a).fraction, 55b0 } :                                                                        // DIVIDEND LEFT ALIGNED
+            dsh[1,1] ? { 1b1, fp64(a).fraction[42,10], 13b0 } :
+                       { 1b1, fp64(a).fraction[29,23], 26b0 };
+    sigB := dsh[0,1] ? { 1b1, fp64(b).fraction } :                                                                              // DIVISOR RIGHT ALIGNED
+            dsh[1,1] ? { 1b1, fp64(b).fraction[42,10] } :
+                       { 1b1, fp64(b).fraction[29,23] };
+}
+unit do_float_divide(
+    input   uint1   START,
+    output  uint1   BUSY,
+    input   uint7   SB,
+    input   uint108 sigA,
+    input   uint108 sigB,
+    input   uint1   powTWO,
+    output  uint108 quotient(0)
+) <reginputs> {
+    uint7               bit = uninitialised;
+    uint7               bitNEXT <:: bit - 1;
+    uint108             remainder = uninitialised;
+    uint108             temporary <:: { remainder[0,107], sigA[bit,1] };
+    uint1               bitRESULT <:: __unsigned(temporary) >= __unsigned(sigB);
+    uint108             remainderNEXT <:: __unsigned(temporary) - ( bitRESULT ? __unsigned(sigB) : 0 );
+    uint1               FINISHED <:: &bit;
+    uint2               STATE = 1;
+                        $$ STATE_FPU_DIV_WAIT = 1
+                        $$ STATE_FPU_DIV_CALC = 2
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                BUSY = START & ~powTWO; if( START ) {
+                    if( powTWO ) {                                                                                              // DETECT DIVISION BY POWER OF 2
+                        quotient = sigA;                                                                                        //      RETURN DIVIDEND
+                    } else {
+                        bit = SB; quotient = 0; remainder = 0; STATE = $STATE_FPU_DIV_CALC$;
+                    }
+                }
+            }
+            case 1: {
+                if( FINISHED ) {
+                    BUSY = 0; STATE = $STATE_FPU_DIV_WAIT$;
+                } else {
+                    remainder = remainderNEXT; quotient[ bit, 1 ] = bitRESULT; bit = bitNEXT;
+                }
+            }
+        }
+    }
+}
+unit floatdivide(
+    input   uint1   START,
+    output  uint1   BUSY,
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint64  a,                                                                                                          // A INPUT FOR A/B
+    input   uint5   F1_TYPE,                                                                                                    // { ZF INF sNAN qNAN ZERO }
+    input   uint64  b,                                                                                                          // B INPUT FOR A/B
+    input   uint5   F2_TYPE,                                                                                                    // { ZF INF sNAN qNAN ZERO }
+    input   uint7   SB,                                                                                                         // POINT TO START DIVISION AT 107/49/23 FOR DOUBLE/SINGLE?HALF
+    input   uint1   OF,
+    input   uint1   UF,
+    output  uint5   flags,                                                                                                      // OPERATION FLAGS
+    output  uint4   special,
+    output  int13   exponent,
+    output  uint106 fraction
+) <reginputs> {
+    uint1               NV <:: ( F1_TYPE[3,1] & F2_TYPE[3,1] ) | ( |F1_TYPE[1,2] | |F2_TYPE[1,2] ) | F2_TYPE[0,1];                                                            // NOT VALID IF INF, NAN OR B == 0
+    uint2               ACTION <:: { ( |F1_TYPE[1,3] | |F2_TYPE[1,3] ), ( F1_TYPE[0,1] | F2_TYPE[0,1] ) };                                              // DO DIVISION IF NOT INFINITY, NAN OR ZERO
+
+    prep_float_divide PREP(                                                                                                     // PREPARE THE DIVISION INPUTS
+        dsh <: dsh,
+        a <: a,
+        b <: b,
+        quotientexp :> exponent
+    );
+    do_float_divide DODIVIDE(                                                                                                   // DO THE DIVISION PASS QUOTIENT FOR NORMALISATION
+        SB <: SB,
+        sigA <: PREP.sigA,
+        sigB <: PREP.sigB,
+        powTWO <: F2_TYPE[4,1],
+        quotient :> fraction
+    );
+
+    DODIVIDE.START := START & ~|ACTION; BUSY := START | DODIVIDE.BUSY;                                                          // START AND BUSY FLAGS
+
+    always {
+        switch( ACTION ) {
+            case 2b00: { special = 0; }                                                                                         // DIVISION IS VALID
+            case 2b01: { special = ( F1_TYPE[0,1] & F2_TYPE[0,1] ) ? 7b0000010 : F2_TYPE[0,1] ? 7b0001000 : 7b0000001; }                                // ZERO INPUT, NAN IF BOTH ZERO, INF IF B ZERO, ZERO IF A ZERO
+            default: { special = NV ? 7b0000010 : ( F1_TYPE[0,1] | F2_TYPE[3,1] ) ? 7b0000001 : 7b0001000; }                                   // qNAN IF INVALID, 0 IF A IS 0 OR B IS INF, INF IF INF / OTHER
+        }
+        flags = { NV, F2_TYPE[0,1], ~|ACTION & OF, ~|ACTION & UF, 1b0};                                                                // RETURN FLAGS
+    }
+}
+
+// ADAPTED FROM https://projectf.io/posts/square-root-in-verilog/
+//
+// MIT License
+//
+// Copyright (c) 2021 Will Green, Project F
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+unit prep_float_sqrt(
+    input   uint10  BIAS,                                                                                                       // BIAS FOR DOUBLE/SINGLE/HALF
+    input   uint64  a,                                                                                                          // A INPUT FOR SQRT(A)
+    output  uint1   expODD,
+    output  int13   squarerootexp,
+    output  uint108 START_ac,
+    output  uint106 START_x
+) <reginputs> {
+    int13               expA <:: fp64( a ).exponent - BIAS;                                                                     // EXTRACT EXPONENT AND REMOVE BIAS
+
+    squarerootexp := expA >>> 1;                                                                                                // RESULT EXPONENT IS HALF OF INPUT EXPONENT
+    START_ac := expA[0,1] ? { 106b0, 1b1, a[ 51, 1 ] } : 1;                                                                     // STARTING ACCUMULATOR ( depends if exp is odd / even )
+    START_x := expA[0,1] ? { a[0,51], 55b0 } : { fp64( a ).fraction, 54b0 };                                                    // STARTING FRACTION ( depends if exp is odd / even )
+    expODD := expA[0,1];                                                                                                        // IS EXP ODD, RETURN SQRT(2) OR 1 FOR POWER OF 2 SQUAREROOTS
+}
+unit do_float_sqrt(
+    input   uint1   START,
+    output  uint1   BUSY,
+    input   uint6   SB,
+    input   uint1   powTWO,
+    input   uint1   expODD,
+    input   uint108 START_ac,
+    input   uint106 START_x,
+    output  uint54  squareroot
+) <reginputs> {
+    uint108             ac = uninitialised;
+    uint106             x = uninitialised;
+    uint108             test_res <:: ac - { squareroot, 2b01 };
+    uint6               i = uninitialised;
+    uint6               iNEXT <:: i - 1;
+    uint1               FINISHED <:: &i;
+
+    uint2               STATE = 1;
+                        $$ STATE_FPU_SQRT_WAIT  = 1
+                        $$ STATE_FPU_SQRT       = 2
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                BUSY = START & ~powTWO;
+                if( START ) {
+                    if( powTWO ) {
+                        squareroot = expODD ? 54h2D413CCCFE7799 : 1;                                                            // DETECT POWER OF 2, RETURN ROOT 2 / 1 IF EXP ODD / EVEN
+                    } else {
+                        i = SB; squareroot = 0; ac = START_ac; x = START_x;                                                     // SELECT STARTING BIT ( counter for number of bits to process )
+                        STATE = $STATE_FPU_SQRT$;
+                    }
+                }
+            }
+            case 1: {
+                if( FINISHED ) {
+                    BUSY = 0; STATE = $STATE_FPU_SQRT_WAIT$;
+                } else {
+                    ac = { test_res[107,1] ? ac[0,105] : test_res[0,105], x[104,2] };                                           // FIND NEW ACCUMULATOR
+                    squareroot = { squareroot[0,53], ~test_res[107,1] };                                                        // ADD NEXT BIT TO SQUAREROOT ( shift in from right )
+                    x = { x[0,104], 2b00 };                                                                                     // MOVE 2 PLACES ALONG REMAINING FRACTION
+                    i = iNEXT;                                                                                                  // MOVE TO NEXT BIT
+                }
+            }
+        }
+    }
+}
+unit floatsqrt(
+    input   uint1   START,
+    output  uint1   BUSY,
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint10  BIAS,                                                                                                       // BIAS FOR DOUBLE/SINGLE/HALF
+    input   uint3   rm,                                                                                                         // ROUNDING MODE FLAG
+    input   uint64  a,                                                                                                          // A INPUT FOR SQRT(A)
+    input   uint5   F1_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } FOR A
+    input   uint6   SB,                                                                                                         // POINT TO START SQUAREROOT AT 53/24/11 FOR DOUBLE/SINGLE/HALF
+    input   uint1   OF,
+    input   uint1   UF,
+    output  uint5   flags,                                                                                                      // OPERATION FLAGS
+    output  uint7   special,
+    output  uint54  fraction,
+    output  int13   exponent
+) <reginputs> {
+    uint1               ACTION <:: ~( |F1_TYPE[0,4] | fp64( a ).sign );                                                        // CALCULATION VALID IF NORMAL POSITIVE NUMBER ( 0 IS SPECIAL )
+
+    prep_float_sqrt PREP( BIAS <: BIAS, a <: a, squarerootexp :> exponent );                                                    // PREPARE THE SQUAREROOT INPUTS
+    do_float_sqrt DOSQRT(                                                                                                       // CALCULATE SQUARE ROOT
+        SB <: SB,
+        powTWO <: F1_TYPE[4,1],
+        expODD <: PREP.expODD,
+        START_ac <: PREP.START_ac,
+        START_x <: PREP.START_x,
+        squareroot :> fraction
+    );
+
+    DOSQRT.START := START & ACTION; BUSY := START | DOSQRT.BUSY;                                                                // START AND BUSY FLAGS
+    flags := { |F1_TYPE[1,3] | fp64( a ).sign, 1b0, ACTION & OF, ACTION & UF, 1b0 };                                           // RETURN FLAGS, INVALID IF INFINITY, NAN OR NEGATIVE
+    special := ACTION ? 0 : fp64( a ).sign ? 7b0000010 : 7b1000000;
+}
+
+// FLOATING POINT COMPARISONS - ADAPTED FROM SOFT-FLOAT
+/*============================================================================
+ *
+ * License for Berkeley SoftFloat Release 3e
+ *
+ * John R. Hauser
+ * 2018 January 20
+ *
+ * The following applies to the whole of SoftFloat Release 3e as well as to
+ * each source file individually.
+ *
+ * Copyright 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018 The Regents of the
+ * University of California.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions, and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions, and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the University nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS "AS IS", AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, ARE
+ * DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE FOR ANY
+ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS RESULTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * =============================================================================*/
+
+unit floatcompare(
+    input   uint64  a,                                                                                                          // A INPUT FOR A<B OR A==B ( repacked into double bitfields )
+    input   uint64  b,                                                                                                          // B INPUT FOR A<B OR A==B ( repacked into double bitfields )
+    input   uint1   F1_OR_F2_NAN,                                                                                               // { ZF INF sNAN qNAN ZERO } FOR A
+    input   uint1   F1_AND_F2_ZERO,                                                                                             // A == 0 AND B == 0?
+    input   uint1   F1_ZERO_FRACTION,                                                                                           // A FRACTION == 0?
+    input   uint1   F2_ZERO_FRACTION,                                                                                           // B FRACTION == 0?
+    output  uint1   less,                                                                                                       // A < B FLAG
+    output  uint1   equal                                                                                                       // A == B FLAG
+) <reginputs> {
+    uint1               a_eq_b <:: ( a == b );                                                                                  // A == B ( BITSTREAM )
+    uint1               a_lt_b <:: ( __unsigned( a ) < __unsigned( b ) );
+    uint1               abTRUEZERO <:: F1_AND_F2_ZERO & F1_ZERO_FRACTION & F2_ZERO_FRACTION;                                    // A == 0 & B == 0 ( NOT SUBNORMAL )
+
+    less := ~F1_OR_F2_NAN & ( ( fp64( a ).sign ^ fp64( b ).sign ) ? fp64( a ).sign & ~abTRUEZERO : ~a_eq_b & ( fp64( a ).sign ^  a_lt_b ) );
+    equal := ~F1_OR_F2_NAN & ( a_eq_b | abTRUEZERO );
+}

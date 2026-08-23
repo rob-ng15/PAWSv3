@@ -1,0 +1,331 @@
+$$if ICARUS or VERILATOR then
+// PLL for simulation
+unit pll(
+  output  uint1 video_clock,
+  output! uint1 sdram_clock,
+  output! uint1 clock_decode,
+  output  uint1 compute_clock
+) {
+  uint3 counter = 0;
+  uint8 trigger = 8b11111111;
+  sdram_clock   := clock;
+  clock_decode   := clock;
+  compute_clock := ~counter[0,1];   // x2 slower
+  video_clock   := counter[1,1];    // x4 slower
+
+  always { counter = counter + 1; trigger = trigger >> 1; }
+}
+$$end
+
+unit main(
+    // LEDS (8 of)
+    output  uint8   leds,
+$$if not SIMULATION then
+    input   uint$NUM_BTNS$ btns,
+
+    // UART
+    output  uint1   uart_tx,
+    input   uint1   uart_rx,
+
+    // GPIO
+    input   uint28  gn,
+    output  uint28  gp,
+
+    // USB PS/2
+    input   uint1   us2_bd_dp,
+    input   uint1   us2_bd_dn,
+    output  uint1   usb_fpga_pu_dp(1),
+    output  uint1   usb_fpga_pu_dn(1),
+
+    // AUDIO
+    output  uint4   audio_l,
+    output  uint4   audio_r,
+
+    // SDCARD
+    output  uint1   sd_clk,
+    output  uint1   sd_mosi,
+    output  uint1   sd_csn,
+    input   uint1   sd_miso,
+$$end
+
+$$if HDMI then
+    // HDMI OUTPUT
+    output! uint4   gpdi_dp,
+$$end
+$$if VGA then
+    // VGA OUTPUT
+    output! uint$color_depth$ video_r,
+    output! uint$color_depth$ video_g,
+    output! uint$color_depth$ video_b,
+    output  uint1 video_hs,
+    output  uint1 video_vs,
+$$end
+$$if VERILATOR then
+    output  uint1 video_clock,
+$$end
+    // SDRAM
+    output! uint1  sdram_cle,
+    output! uint2  sdram_dqm,
+    output! uint1  sdram_cs,
+    output! uint1  sdram_we,
+    output! uint1  sdram_cas,
+    output! uint1  sdram_ras,
+    output! uint2  sdram_ba,
+    output! uint13 sdram_a,
+$$if VERILATOR then
+    output! uint1  sdram_clock, // sdram controller clock
+    input   uint16 sdram_dq_i,
+    output! uint16 sdram_dq_o,
+    output! uint1  sdram_dq_en,
+$$else
+    output uint1  sdram_clk,  // sdram chip clock != internal sdram_clock
+    inout  uint16 sdram_dq,
+$$end
+    inout   uint1   gpdi_sda,   // i2c for rtc
+    inout   uint1   gpdi_scl
+) <@clock_system,reginputs> {
+    uint1   clock_system = uninitialized;
+    uint1   clock_gpu = uninitialized;
+    uint1   clock_cpu = uninitialized;
+    uint1   clock_cache = uninitialized;
+    uint1   clock_decode = uninitialized;
+    uint1   clock_palette = uninitialized;
+$$if VERILATOR then
+    $$clock_25mhz = 'video_clock'
+    // --- PLL
+    pll clockgen<@clock,!reset>(
+      video_clock   :> video_clock,
+      sdram_clock   :> sdram_clock,
+      clock_decode   :> clock_decode,
+      compute_clock :> clock_system,
+      compute_clock :> clock_gpu,
+      compute_clock :> clock_cpu,
+      clock_decode :> clock_cache,
+      compute_clock :> clock_palette,
+    );
+$$else
+    $$clock_25mhz = 'clock'
+    // CLOCK/RESET GENERATION
+    // CPU + MEMORY
+    uint1   sdram_clock = uninitialized;
+    uint1   pll_lock_SYSTEM = uninitialized;
+    ulx3s_clk_PAWS_SYSTEM clk_gen_SYSTEM (
+        clkin    <: $clock_25mhz$,
+        clkSYSTEM  :> clock_system,
+        clkSDRAM :> sdram_clock,
+        clkGPU :> clock_gpu,
+        clkSDRAMcontrol :> sdram_clk,
+        locked   :> pll_lock_SYSTEM
+    );
+    uint1   pll_lock_CPU = uninitialized;
+    ulx3s_clk_PAWS_CPU clk_gen_CPU (
+        clkin    <: $clock_25mhz$,
+        clkCPU :> clock_cpu,
+        clkDECODE :> clock_decode,
+        clkCACHE :> clock_cache,
+        clkPAL :> clock_palette,
+        locked   :> pll_lock_CPU
+    );
+$$end
+    csr_timer TIMER();                                                                                                          // SYSTEM TIMER
+
+    // MEMORY MULTIPLEXER/DEMULTIPLEXER
+    uint1               CS_SDRAM <: BUS.MEM_ADDR[$addr_width-1$,1];                                                             // CHIPSELECT   SDRAM
+    uint1               CS_BRAM  <: ~|BUS.MEM_ADDR[$addr_width-4$,4] & ~BUS.MEM_ADDR[15,1];                                     //              BRAM / BIOS
+    uint1               CS_BITMAP <: BUS.MEM_ADDR[$addr_width-2$,2] == 2b01;                                                                 //              FRAMEBUFFER(S)
+    uint1               CS_CMAP <: BUS.MEM_ADDR[$addr_width-3$,3] == 3b001;                                                                  //              CHARACTER MAP BUFFER
+    uint1               CS_TMAP <: BUS.MEM_ADDR[$addr_width-4$,4] == 4b0001;                                                                 //              TILE MAP BUFFER(S)
+    uint1               CS_TIMERS <: ~|BUS.MEM_ADDR[$addr_width-4$,4] & ( BUS.MEM_ADDR[12,4] == 4hc );                                                  //              TIMER REGISTERS
+    uint1               CS_VIDEO <: ~|BUS.MEM_ADDR[$addr_width-4$,4] & ( BUS.MEM_ADDR[12,4] == 4hd );                                                   //              VIDEO BLOCKS REGISTERS
+    uint1               CS_AUDIO <: ~|BUS.MEM_ADDR[$addr_width-4$,4] & ( BUS.MEM_ADDR[12,4] == 4he );                                                   //              AUDIO REGISTERS
+    uint1               CS_IO <: ~|BUS.MEM_ADDR[$addr_width-4$,4] & ( BUS.MEM_ADDR[12,4] == 4hf );                                                      //              I/O + DMA + SMT REGISTERS
+    uint$addr_width$    MEM_ADDR2 <: BUS.MEM_ADDR + 2;                                                                          // EXTR ADDRESS LINES               + 2
+    uint$addr_width$    MEM_ADDR0 <: BUS.MEM_ADDR + { BUS.MEM_ADDR[1,1], 1b0 };                                                 //                                  ALIGN ON 16 BIT BOUNDARY
+
+    uint1   MEM_BUSY <: CS_SDRAM ? SDRAM.BUSY | BUS.MEM_RENABLE | BUS.MEM_WENABLE :
+                                   BUS.MEM_RENABLE;
+    uint32  MEM_RDATA <: CS_SDRAM ? SDRAM.RDATA :
+                            CS_IO ? IO_Map.RDATA :
+                            CS_BITMAP ? VIDEO_Map.BITMAP_RDATA :                                                                // READ FROM FRAMEBUFFERS
+                            CS_CMAP ? VIDEO_Map.CMAP_RDATA :                                                                  // READ FROM CHARACTERMAP
+                            CS_TMAP ? VIDEO_Map.TMAP_RDATA[BUS.MEM_ADDR[18,2]*9,9] :                                               // READ FROM TILEMAPS
+                            CS_TIMERS ? TIMERS_Map.RDATA :                                                                      // READ FROM TIMERS
+                            CS_AUDIO ? AUDIO_Map.RDATA :                                                                       // READ FROM AUDIO
+                            CS_VIDEO ? VIDEO_Map.RDATA :
+                            CS_IO ? IO_Map.RDATA :                                                                               // READ FROM I/O
+                                    BRAM.RDATA;                                                                                 // READ FROM BRAM
+
+    bus BUS(
+        clock_cache <: clock_cache,
+        clock_cpu <: clock_cpu,
+        clock_decode <: clock_decode,
+
+        MEM_RDATA <: MEM_RDATA,
+        MEM_BUSY <: MEM_BUSY,
+
+        DMASTART <: IO_Map.DMASTART,
+        DMASOURCE <: IO_Map.DMASOURCE,                                                                                          //  REGISTERS FROM IO MEMORY MAP
+        DMASOURCEADD <: IO_Map.DMASOURCEADD,
+        DMADEST <: IO_Map.DMADEST,
+        DMADESTADD <: IO_Map.DMADESTADD,
+        DMACOUNT <: IO_Map.DMACOUNT,
+        DMACYCLES <: IO_Map.DMACYCLES,
+        DMAMODE <: IO_Map.DMAMODE,
+        DMASET <: IO_Map.DMASET,
+
+        L_AUDIO_DMA_STATUS <: AUDIO_Map.L_AUDIO_DMA_STATUS,                                                                     //  CONTROL REGISTER    { 11025/22050, REPEAT, START, STOP }
+        L_AUDIO_DMA_BASE <: AUDIO_Map.L_AUDIO_DMA_BASE,                                                                         //  BASE MEMORY ADDRESS
+        L_AUDIO_DMA_LENGTH <: AUDIO_Map.L_AUDIO_DMA_LENGTH,                                                                     //  NUMBER OF SAMPLES
+
+        R_AUDIO_DMA_STATUS <: AUDIO_Map.R_AUDIO_DMA_STATUS,                                                                     //  CONTROL REGISTER    { 11025/22050, REPEAT, START, STOP }
+        R_AUDIO_DMA_BASE <: AUDIO_Map.R_AUDIO_DMA_BASE,                                                                         //  BASE MEMORY ADDRESS
+        R_AUDIO_DMA_LENGTH <: AUDIO_Map.R_AUDIO_DMA_LENGTH,                                                                     //  NUMBER OF SAMPLES
+
+        RDTIME <: TIMER.counter, IRQ_TIMER <: IO_Map.IRQ_TIMER, TIMER_VALID <: IO_Map.TIMER_VALID,
+        IRQ_VBLANK <: VIDEO_Map.IRQ_VBLANK
+    );
+
+    // SDRAM chip controller by @sylefeb
+    uint1   sdram_reset = uninitialized; clean_reset sdram_rstcond <@sdram_clock,!reset> ( out :> sdram_reset );                // SDRAM RESET SIGNAL GENERATOR
+    sdram_r16w16_io sio_fullrate; sdram_r16w16_io sio_halfrate;                                                                 // SDRAM IS 16 BIT 100MHz SDRAM CLOCK, 50MHz SYSTEM CLOCK
+    sdram_half_speed_access sdaccess <@sdram_clock,!sdram_reset> ( sd <:> sio_fullrate, sdh <:> sio_halfrate );                 // SDRAM RUNS AT 100MHZ, SYSTEM AT 50MHz
+    sdram_controller_autoprecharge_r16_w16 sdram32MB <@sdram_clock,!sdram_reset> (                                              // SDRAM CONTROLLER
+        sd        <:> sio_fullrate,                                                                                             // CONTROL SIGNALS GO THROUGH A CLOCK GATE
+        sdram_cle :>  sdram_cle,
+        sdram_dqm :>  sdram_dqm,
+        sdram_cs  :>  sdram_cs,
+        sdram_we  :>  sdram_we,
+        sdram_cas :>  sdram_cas,
+        sdram_ras :>  sdram_ras,
+        sdram_ba  :>  sdram_ba,
+        sdram_a   :>  sdram_a,
+    $$if VERILATOR then
+        dq_i       <: sdram_dq_i,
+        dq_o       :> sdram_dq_o,
+        dq_en      :> sdram_dq_en,
+    $$else
+        sdram_dq  <:> sdram_dq,
+    $$end
+    );
+
+    cachecontroller SDRAM <@clock_system,!reset> (                                                                               // SDRAM VIA CACHE ( controls 16 BIT <-> 32 BIT )
+        sio <:> sio_halfrate,
+        clock_cache <: clock_cache,
+
+        CS <: CS_SDRAM,
+        RENABLE <: BUS.MEM_RENABLE,
+        WENABLE <: BUS.MEM_WENABLE,
+        SIZE <: BUS.MEM_SIZE,
+        ADDR <: BUS.MEM_ADDR[0,$paws_ram$],
+        ADDR0 <: MEM_ADDR0[0,$paws_ram$],
+        ADDR2 <: MEM_ADDR2[0,$paws_ram$],
+        WDATA <: BUS.MEM_WDATA
+    );
+
+    bramcontroller BRAM <@clock_system,!reset> (                                                                                 // BRAM CONTROLLER
+        CS <: CS_BRAM,
+        SIZE <: BUS.MEM_SIZE,
+        ADDR <: BUS.MEM_ADDR,
+        ADDR2 <: MEM_ADDR2,
+        WDATA <: BUS.MEM_WDATA,
+        WENABLE <: BUS.MEM_WENABLE
+    );
+
+    io_memmap IO_Map <@clock_system,!reset> (                                                                                   // I/O REGISTERS CONTROLLER
+        CS <: CS_IO,
+        ADDR <: BUS.MEM_ADDR,                                                                                                        //  MEMORY MAPPING
+        WENABLE <: BUS.MEM_WENABLE,
+        RENABLE <: BUS.MEM_RENABLE,
+        WDATA <: BUS.MEM_WDATA,
+
+        leds :> leds,                                                                                                           //  LEDS
+$$if not SIMULATION then
+        gn <: gn,                                                                                                               //  GPIO
+        gp :> gp,
+        btns <: btns,                                                                                                           //  ULX3S BUTTONS
+        uart_tx :> uart_tx,                                                                                                     //  UART
+        uart_rx <: uart_rx,
+        us2_bd_dp <: us2_bd_dp,                                                                                                 //  USB OTG PORT, FOR PS/2 KEYBOARD
+        us2_bd_dn <: us2_bd_dn,
+        sd_clk :> sd_clk,                                                                                                       //  SDCARD
+        sd_mosi :> sd_mosi,
+        sd_csn :> sd_csn,
+        sd_miso <: sd_miso,
+$$end
+        gpdi_sda <:> gpdi_sda,                                                                                                  //  RTC ACCESS
+        gpdi_scl <:> gpdi_scl,
+
+        DMAACTIVE <: BUS.DMAACTIVE,
+        RDTIME <: TIMER.counter,
+        IRQ_VBLANK <: VIDEO_Map.IRQ_VBLANK
+    );
+
+    timers_memmap TIMERS_Map <@clock_system,!reset> (                                                                           // TIMERS REGISTERS CONTROLLER
+        CS <: CS_TIMERS,
+        ADDR <: BUS.MEM_ADDR,                                                                                                        //  MEMORY MAPPING
+        WENABLE <: BUS.MEM_WENABLE,
+        RENABLE <: BUS.MEM_RENABLE,
+        WDATA <: BUS.MEM_WDATA,
+    );
+
+    $$if SIMULATION then
+        uint4 audio_l(0);
+        uint4 audio_r(0);
+    $$end
+    pulse_1khz PULSE();                                                                                                         // Generate 1KHz pulse for audio timing
+    audio_memmap AUDIO_Map <@clock_system,!reset> (                                                                             // AUDIO REGISTERS CONTROLLER
+        CS <: CS_AUDIO,
+        ADDR <: BUS.MEM_ADDR,                                                                                                        //  MEMORY MAPPING
+        WENABLE <: BUS.MEM_WENABLE,
+        WDATA <: BUS.MEM_WDATA,
+        audio_l :> audio_l,
+        audio_r :> audio_r,
+        STATIC <: TIMERS_Map.static16bit,
+        L_ADMA_ACTIVE <: BUS.L_ADMA_ACTIVE,
+        L_SAMPLE <: BUS.L_AUDIO_DMA_SAMPLE,
+        R_ADMA_ACTIVE <: BUS.R_ADMA_ACTIVE,
+        R_SAMPLE <:  BUS.R_AUDIO_DMA_SAMPLE,
+        RDTIME <: TIMER.counter,
+        PULSE1KHZ <: PULSE.PULSE_1KHZ
+    );
+
+
+    video_memmap VIDEO_Map <@clock_system,!reset> (                                                                             // VIDEO REGISTERS AND MEMORY CONTROLLERS
+        CS <: CS_VIDEO,
+        CS_BM <: CS_BITMAP,
+        CS_CM <: CS_CMAP,
+        CS_TM <: CS_TMAP,
+
+        video_clock <: $clock_25mhz$,
+        gpu_clock <: clock_gpu,
+        palette_clock <: clock_palette,
+        ADDR <: BUS.MEM_ADDR,
+        ADDR0 <: MEM_ADDR0,
+        SIZE <: BUS.MEM_SIZE,
+        WDATA <: BUS.MEM_WDATA,
+        WENABLE <: BUS.MEM_WENABLE,
+
+$$if HDMI then
+        gpdi_dp :> gpdi_dp,
+$$end
+$$if VGA then
+        video_r  :> video_r,
+        video_g  :> video_g,
+        video_b  :> video_b,
+        video_hs :> video_hs,
+        video_vs :> video_vs,
+$$end
+        staticGenerator <: TIMERS_Map.static16bit[0,10],
+        blink <: TIMER.counter[23,1],
+        flash <: TIMER.counter[24,1],
+
+        sdcardlightcolour <: IO_Map.sdcardlightcolour,
+$$if not SIMULATION then
+        sdcarderror <: IO_Map.sd_error,
+$$end
+        JOYSTICK <: IO_Map.JOYSTICK,
+        CAPSLOCK <: IO_Map.CAPSLOCK,
+        NUMLOCK <: IO_Map.NUMLOCK,
+        RESETSTATUS <: IO_Map.RESETSTATUS
+    );
+}

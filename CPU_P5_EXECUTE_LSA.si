@@ -1,0 +1,244 @@
+    // EXECUTE_LSA_FLAGS = { CUSTOM, STORE, LOAD, ATOMIC, WR_F, WR }
+    $$ EX_LSA_IS_WR =          "EXECUTE_LSA_FLAGS[ 0,1]"
+    $$ EX_LSA_IS_WR_F =        "EXECUTE_LSA_FLAGS[ 1,1]"
+    $$ EX_LSA_IS_ATOMIC =      "EXECUTE_LSA_FLAGS[ 2,1]"
+    $$ EX_LSA_IS_LOAD =        "EXECUTE_LSA_FLAGS[ 3,1]"
+    $$ EX_LSA_IS_STORE =       "EXECUTE_LSA_FLAGS[ 4,1]"
+    $$ EX_LSA_IS_CUSTOM =      "EXECUTE_LSA_FLAGS[ 5,1]"
+
+unit cpu_execute_lsa(
+    input   uint1               DMA_ACTIVE,
+
+    input   uint64              EXECUTE_LSA_I2,                                                                                           // INTEGER REGISTERS
+    input   uint64              EXECUTE_LSA_F2,                                                                                           // FLOAT REGISTERS
+
+    output  uint1               EXECUTE_LSA_READY,
+    input   uint1               EXECUTE_LSA_ACK,
+    input   uint32              EXECUTE_LSA_INSTRUCTION,
+    input   uint6               EXECUTE_LSA_FLAGS,
+    input   uint$addr_width$    EXECUTE_LSA_ADDRESS,
+
+    output  uint1               EXECUTE_LSA_RESULT_READY,
+    input   uint1               COMMIT_EXECUTE_LSA_RESULT_ACK,
+    output  uint1               EXECUTE_LSA_RESULT_F_READY,
+    input   uint1               COMMIT_F_EXECUTE_LSA_RESULT_F_ACK,
+    output  uint64              COMMIT_LSA_RESULT,
+    output  uint5               COMMIT_LSA_REGISTER,
+
+    output  uint64              EXECUTE_LSA_RD,                                                                                      // INSTRUCTION IN EXECUTE IS WRITING TO { FLOAT, RD }
+
+    output  uint$addr_width$    MEM_ADDR_LOAD,
+    output  uint1               MEM_REQ_LOAD,
+    output  uint2               MEM_SIZE_LOAD,
+    input   uint64              MEM_RDATA,
+    input   uint1               MEM_BUSY_LOAD,
+    input   uint1               MEM_ACK_LOAD,
+
+    output  uint$addr_width$    MEM_ADDR_STORE,
+    output  uint1               MEM_REQ_STORE,
+    output  uint2               MEM_SIZE_STORE,
+    output  uint64              MEM_WDATA,
+    input   uint1               MEM_BUSY_STORE,
+    input   uint1               MEM_ACK_STORE
+) <reginputs> {
+    uint4              STATE = 1;
+
+    uint1               IS_LR <:: $EX_LSA_IS_ATOMIC$ & ~$EX_LSA_IS_STORE$;
+    uint1               IS_SC <:: $EX_LSA_IS_ATOMIC$ & ~$EX_LSA_IS_LOAD$;
+    uint1               IS_FS <:: ( ( EXECUTE_LSA_INSTRUCTION[2,5] == 5b00010 ) & EXECUTE_LSA_INSTRUCTION[13,1] ) | EXECUTE_LSA_INSTRUCTION[2,1];
+    cpu_load LOAD(
+        IS_SC <: IS_SC,
+        CPU_ADDR_LOAD <: EXECUTE_LSA_ADDRESS,
+        CPU_FLOAT_LOAD <: $EX_LSA_IS_WR_F$,
+        MEM_ADDR_LOAD :> MEM_ADDR_LOAD,
+        MEM_REQ_LOAD :> MEM_REQ_LOAD,
+        MEM_SIZE_LOAD :> MEM_SIZE_LOAD,
+        MEM_RDATA <: MEM_RDATA,
+        MEM_BUSY_LOAD <: MEM_BUSY_LOAD,
+        MEM_ACK_LOAD <: MEM_ACK_LOAD,
+        CPU_RDATA :> COMMIT_LSA_RESULT
+    );
+
+    aluA ALUA( F7 <: Rtype( EXECUTE_LSA_INSTRUCTION ).f7[2,5], RDATA <: LOAD.CPU_RDATA, I2 <: EXECUTE_LSA_I2 );                 // ATOMIC MEMORY OPERATIONS ( NOT TESTED )
+
+    cpu_store STORE(
+        CPU_ADDR_STORE <: EXECUTE_LSA_ADDRESS,
+        MEM_ADDR_STORE :> MEM_ADDR_STORE,
+        MEM_WDATA :> MEM_WDATA,
+        MEM_REQ_STORE :> MEM_REQ_STORE,
+        MEM_SIZE_STORE :> MEM_SIZE_STORE,
+        MEM_BUSY_STORE <: MEM_BUSY_STORE,
+        MEM_ACK_STORE <: MEM_ACK_STORE
+    );
+
+    LOAD.CPU_SIZE_LOAD := $EX_LSA_IS_CUSTOM$ ? EXECUTE_LSA_INSTRUCTION[29,3] : Rtype( EXECUTE_LSA_INSTRUCTION ).f3;
+    STORE.CPU_SIZE_STORE := $EX_LSA_IS_CUSTOM$ ? EXECUTE_LSA_INSTRUCTION[29,2] : Rtype( EXECUTE_LSA_INSTRUCTION ).f3[0,2];
+
+    LOAD.START := 0;
+    STORE.START := 0;
+    STORE.CPU_WDATA := $EX_LSA_IS_ATOMIC$ ? Rtype( EXECUTE_LSA_INSTRUCTION ).f7[3,1] ? ALUA.RESULT :                            // AMO OPERATION
+                                                                                       EXECUTE_LSA_I2 :                         // SC.x
+                                                                               IS_FS ? EXECUTE_LSA_F2 :                         // FSTORE
+                                                                                       EXECUTE_LSA_I2;                          // STORE
+
+    COMMIT_LSA_REGISTER := { $EX_LSA_IS_WR$ ? Rtype( EXECUTE_LSA_INSTRUCTION ).rd : 5b00000 };                                  // REGISTER TO COMMIT TO
+
+    EXECUTE_LSA_RESULT_READY := ~$EX_LSA_IS_WR_F$ & STATE[3,1];
+    EXECUTE_LSA_RESULT_F_READY := $EX_LSA_IS_WR_F$ & STATE[3,1];
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                if( EXECUTE_LSA_ACK ) {                                                                                         // WAIT FOR AGU TO ACKNOWLEDGE INSTRUCTION IS READY
+                    EXECUTE_LSA_READY = 0;                                                                                      //  HALT AGU SENDING MORE INSTRUCTIONS
+                    EXECUTE_LSA_RD[ { $EX_LSA_IS_WR_F$, $EX_LSA_IS_WR$ ? Rtype( EXECUTE_LSA_INSTRUCTION ).rd : 5b00000 }, 1 ] = 1;      //  FLAG RD FOR CONTENTION
+
+                    if( $EX_LSA_IS_LOAD$ ) {
+                        LOAD.START = 1; STATE = 2;
+                    } else {
+                        STATE = 4;
+                    }
+                }
+            }
+            case 1: { if( ~LOAD.BUSY ) { STATE = $EX_LSA_IS_STORE$ ? 4 : 8; } }                                                 // ATOMIC ALU
+            case 2: { if( ~STORE.BUSY ) { STORE.START = 1; STATE = 8; } }                                                       // STORE FROM ATOMIC OR IF STORE WAS BUSY
+            case 3: {
+                if( COMMIT_EXECUTE_LSA_RESULT_ACK | COMMIT_F_EXECUTE_LSA_RESULT_F_ACK ) {
+                    EXECUTE_LSA_RD = 0; EXECUTE_LSA_READY = 1; STATE = 1;
+                }
+            }
+        }
+
+        if( reset ) { EXECUTE_LSA_RD = 0; EXECUTE_LSA_READY = 1; STATE = 1; }
+    }
+}
+
+// ATOMIC A EXTENSION ALU
+unit aluA(
+    input   uint3   F3,
+    input   uint5   F7,
+    input   uint64  RDATA,
+    input   uint64  I2,
+    output  uint64  RESULT
+) <reginputs> {
+    uint64  I_1 <:: &F3[0,2] ? RDATA : { {32{F7[3,1] &  RDATA[31,1]}}, RDATA[0,32] };                                           // 32/64 BIT FOR MEMORY INPUT
+    uint64  I_2 <:: &F3[0,2] ?    I2 : { {32{F7[3,1] &     I2[31,1]}},    I2[0,32] };                                           // 32/64 BIT FOR SOURCEREG2
+    uint1   MINMAX <:: ( F7[2,1] ^ ( F7[3,1] ? COMPARE.LTU : COMPARE.LT ) );
+    uint64  ADD <:: I_1 + I_2;
+
+    logic_atomic LOGIC( sourceReg1 <: I_1, operand2 <: I_2 );
+    i_compare_atomic COMPARE( I_1 <: I_1, I_2 <: I_2 );                                                                         // INTEGER REGISTER COMPARISON FLAGS
+
+    always {
+        if( F7[4,1] ) {                                                                                                         // AMOMAX[U] AMOMIN[U] [UN]SIGNED COMPARISONS, FLIPPED IF MAX
+            RESULT = MINMAX ? I_1 : I_2;                                                                                        //  MEMORYINPUT SOURCEREG1?
+        } else {
+            switch( F7[0,4] ) {
+                default: { RESULT = ADD; }                                                                                      // ADD
+                case 4b0001: { RESULT = I_2; }                                                                                  // AMOSWAP
+                case 4b0100: { RESULT = LOGIC.XOR; }                                                                            // AMOXOR
+                case 4b1000: { RESULT = LOGIC.OR; }                                                                             // AMOOR
+                case 4b1100: { RESULT = LOGIC.AND; }                                                                            // AMOAND
+            }
+        }
+    }
+}
+
+unit i_compare_atomic(
+    input   int64               I_1,
+    input   int64               I_2,
+    output  uint1               LTU,
+    output  uint1               LT
+) <reginputs> {
+    LTU := ( __unsigned( I_1 ) < __unsigned( I_2 ) );                                                                           //  LTU
+    LT  := (   __signed( I_1 ) <   __signed( I_2 ) );                                                                           //  LT
+}
+
+// CALCULATES AND/ANDN OR/ORN XOR/XNOR
+unit logic_atomic(
+    input   uint64  sourceReg1,
+    input   uint64  operand2,
+    output  uint64  AND,
+    output  uint64  OR,
+    output  uint64  XOR
+) <reginputs> {
+    AND := sourceReg1 & operand2;
+    OR  := sourceReg1 | operand2;
+    XOR := sourceReg1 ^ operand2;
+}
+
+unit cpu_load(
+    input   uint1               IS_SC,
+    input   uint$addr_width$    CPU_ADDR_LOAD,
+    input   uint3               CPU_SIZE_LOAD,
+    input   uint1               CPU_FLOAT_LOAD,
+    output  uint64              CPU_RDATA,
+    output  uint$addr_width$    MEM_ADDR_LOAD,
+    output  uint1               MEM_REQ_LOAD,
+    output  uint2               MEM_SIZE_LOAD,
+    input   uint64              MEM_RDATA,
+    input   uint1               MEM_BUSY_LOAD,
+    input   uint1               MEM_ACK_LOAD,
+    input   uint1               START,
+    output  uint1               BUSY
+) <reginputs> {
+    uint4               STATE = 1;
+    uint1               SIGN_X <:: CPU_FLOAT_LOAD | ( ~CPU_SIZE_LOAD[2,1] & MEM_RDATA[~|CPU_SIZE_LOAD ? 7 : CPU_SIZE_LOAD[0,1] ? 15 : 31, 1] );
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                if( START ) {
+                    MEM_ADDR_LOAD = CPU_ADDR_LOAD; MEM_SIZE_LOAD = CPU_SIZE_LOAD; MEM_REQ_LOAD = 1;
+                    BUSY = 1; STATE = 2;
+                }
+            }
+            case 1: { if( MEM_ACK_LOAD ) { MEM_REQ_LOAD = 0; STATE = 4; } }
+            case 2: { if( ~MEM_BUSY_LOAD ) { STATE = 8; } }
+            case 3: {
+                switch( CPU_SIZE_LOAD[0,2] ) {
+                    case 2b00: { CPU_RDATA = { {56{ SIGN_X }}, MEM_RDATA[0,8] }; }                                              // SIGN EXTEND 8 BIT LOAD ( not for floats )
+                    case 2b01: { CPU_RDATA = { {48{ SIGN_X }}, MEM_RDATA[0,16] }; }                                             // SIGN EXTEND / NAN BOX 16 BIT LOAD
+                    case 2b10: { CPU_RDATA = { {32{ SIGN_X }}, MEM_RDATA[0,32] }; }                                             // SIGN EXTEND / NAN BOX 32 BIT LOAD
+                    case 2b11: { CPU_RDATA = MEM_RDATA; }                                                                       // COPY 64 BIT LOAD
+                }
+                BUSY = 0; STATE = 1;
+            }
+        }
+
+        if( IS_SC ) { CPU_RDATA = 0; }
+        if( reset ) { BUSY = 0; STATE = 1; }
+    }
+}
+
+unit cpu_store (
+    input   uint$addr_width$    CPU_ADDR_STORE,
+    input   uint2               CPU_SIZE_STORE,
+    input   uint64              CPU_WDATA,
+
+    output  uint$addr_width$    MEM_ADDR_STORE,
+    output  uint1               MEM_REQ_STORE,
+    output  uint2               MEM_SIZE_STORE,
+    output  uint64              MEM_WDATA,
+    input   uint1               MEM_BUSY_STORE,
+    input   uint1               MEM_ACK_STORE,
+    input   uint1               START,
+    output  uint1               BUSY
+) <reginputs> {
+    uint3               STATE = 1;
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                if( START ) {
+                    MEM_ADDR_STORE = CPU_ADDR_STORE; MEM_SIZE_STORE = CPU_SIZE_STORE; MEM_WDATA = CPU_WDATA; MEM_REQ_STORE = 1;
+                    BUSY = 1; STATE = 2;
+                }
+            }
+            case 1: { if( MEM_ACK_STORE ) { MEM_REQ_STORE = 0; STATE = 4; } }
+            case 2: { if( ~MEM_BUSY_STORE ) { BUSY = 0; STATE = 1; } }
+        }
+
+        if( reset ) { BUSY = 0; STATE = 1; }
+    }
+}

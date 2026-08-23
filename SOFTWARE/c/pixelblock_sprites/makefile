@@ -1,0 +1,10 @@
+CFLAGSEXTRA=
+include ../makefile-lto.inc
+
+PROJECT=PBSPRITE
+PROJECTTYPE=TEST
+PRJSRC=$(wildcard *.c) $(wildcard *.cpp) $(wildcard *.s) $(wildcard *.h)
+PRJOBJ=pixelblock_sprites.o
+CFLAGSEXTRA=-fweb -fsched-spec-load -frename-registers
+
+include ../makefile-paws.inc

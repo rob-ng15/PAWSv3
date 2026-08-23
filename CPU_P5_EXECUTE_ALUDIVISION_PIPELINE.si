@@ -1,0 +1,214 @@
+unit cpu_execute_aludivide(
+    $$for i=1,2 do
+    input   uint64              EXECUTE_ALUDIVIDE_I$i$,                                                                                           // INTEGER REGISTERS
+    input   uint1               EXECUTE_ALUDIVIDE_I$i$_SIGN,
+    $$end
+
+    output  uint1               EXECUTE_ALUDIVIDE_READY,
+    input   uint1               EXECUTE_ALUDIVIDE_ACK,
+
+    input   uint5               EXECUTE_ALUDIVIDE_DESTREG,
+    input   uint2               EXECUTE_ALUDIVIDE_F3,
+    input   uint1               EXECUTE_DIVIDE_IS_32,
+
+    output  uint1               EXECUTE_ALUDIVIDE_RESULT_READY,
+    input   uint1               COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK,
+
+    output  uint64              COMMIT_ALUDIVIDE_RESULT,
+    output  uint5               COMMIT_ALUDIVIDE_REGISTER,
+
+    output  uint32              EXECUTE_ALUDIVIDE_RD
+) <reginputs> {
+    uint2               STATE = 1;
+
+    divide_execute EXECUTE( COMMIT_READY <: COMMIT.READY );
+
+    divide_commit COMMIT(
+        EXECUTE_ALUDIVIDE_RESULT_READY :> EXECUTE_ALUDIVIDE_RESULT_READY,
+        COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK <: COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK,
+        COMMIT_ALUDIVIDE_RESULT :> COMMIT_ALUDIVIDE_RESULT,
+        COMMIT_ALUDIVIDE_REGISTER :> COMMIT_ALUDIVIDE_REGISTER,
+
+        ACK <: EXECUTE.COMMIT_ACK,
+        RESULT <: EXECUTE.COMMIT_RESULT,
+        DESTREG <: EXECUTE.COMMIT_DESTREG
+    );
+
+    EXECUTE.START := STATE[1,1] & EXECUTE.READY;
+
+    always {
+        uint32      RD = uninitialised;
+
+        onehot( STATE ) {
+            case 0: {
+                if( EXECUTE_ALUDIVIDE_ACK ) {
+                    EXECUTE_ALUDIVIDE_READY = 0; STATE = 2; RD[ EXECUTE_ALUDIVIDE_DESTREG, 1 ] = 1;
+                } else {
+                    RD = 0;
+                }
+            }
+            case 1: {
+                if( EXECUTE.READY ) {
+                    EXECUTE.I1 = EXECUTE_ALUDIVIDE_I1; EXECUTE.I1_SIGN = EXECUTE_ALUDIVIDE_I1_SIGN;
+                    EXECUTE.I2 = EXECUTE_ALUDIVIDE_I2; EXECUTE.I2_SIGN = EXECUTE_ALUDIVIDE_I2_SIGN;
+                    EXECUTE.DESTREG = EXECUTE_ALUDIVIDE_DESTREG;
+                    EXECUTE.F3 = EXECUTE_ALUDIVIDE_F3;
+                    EXECUTE.IS_32 = EXECUTE_DIVIDE_IS_32;
+
+                    EXECUTE_ALUDIVIDE_READY = 1; STATE = 1;
+                }
+            }
+        }
+
+        EXECUTE_ALUDIVIDE_RD = RD | EXECUTE.RD | COMMIT.RD;
+
+        if( reset ) { RD = 0; EXECUTE.START = 0; EXECUTE_ALUDIVIDE_READY = 1; STATE = 1; }
+    }
+}
+
+unit divide_execute(
+    output  uint1               READY,
+    input   uint1               START,
+    output  uint32              RD,
+
+    input   uint64              I1,
+    input   uint64              I2,
+    input   uint1               I1_SIGN,
+    input   uint1               I2_SIGN,
+    input   uint5               DESTREG,
+    input   uint2               F3,
+    input   uint1               IS_32,
+
+    input   uint1               COMMIT_READY,
+    output  uint1               COMMIT_ACK,
+    output  uint64              COMMIT_RESULT,
+    output  uint5               COMMIT_DESTREG
+) <reginputs> {
+    uint5               STATE = 1;
+
+    uint1               NZ <:: |( IS_32 ? I2[0,32] : I2 );                                                                      // CHECK DIVISOR IS NOT ZERO
+    uint1               OV <:: F3[0,1] ? 0 :                                                                                    // CHECK FOR OVERFLOW ( IF UNSIGNED, NOT POSSIBLE )
+                                         ( I1_SIGN & I2_SIGN & ( I2 == 1 ) ) ? IS_32 ? ( I1 == 32h80000000 ) :                  // 32bit -0x80000000 / -1
+                                                                                       ( I1 == 64h8000000000000000 ) :          // 64bit -0x8000000000000000 / -1
+                                                                               0;
+    uint6               SB <:: { ~IS_32, 5b11111 };                                                                             // STARTING / SIGN BIT
+    uint64              NEG <:: -( F3[1,1] ? NZ ? DODIVIDE.remainder : -I1 : DODIVIDE.quotient );                               // NEGATE REMAINDER, I1 OR QUOTIENT IF A NEGATIVE RESULT
+
+    dointegerdivide DODIVIDE( startingbit <: SB, dividend <: I1, divisor <: I2 );
+    DODIVIDE.start := 0;
+
+    COMMIT_ACK := STATE[4,1];
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                if( START ) {
+                    READY = 0; STATE = 2; RD[ DESTREG, 1 ] = 1;
+                } else {
+                    RD = 0;
+                }
+            }
+            case 1: {
+                if( NZ & ~OV ) {
+                    DODIVIDE.start = 1 ; STATE = 4;
+                } else {
+                    STATE = 8;
+                }
+            }
+            case 2: { if( ~DODIVIDE.busy ) { STATE = 8; } }
+            case 3: {
+                if( COMMIT_READY ) {
+                    COMMIT_DESTREG = DESTREG;
+                    COMMIT_RESULT = F3[1,1] ? OV ? 0 :                                                                          // REMAINDER    OVERFLOW 0
+                                            NZ ? I2_SIGN ? NEG: DODIVIDE.remainder :                                          //              NOT /0   CORRECTLY SIGNED
+                                                I1_SIGN ? NEG : I1 :                                                         //              /0       I1
+                                            OV ? IS_32 ? 64hFFFFFFFF80000000 : 64h8000000000000000 :                          // QUOTIENT     OVERFLOW -2^(xlen-1)
+                                            NZ ? ( I1_SIGN ^ I2_SIGN ) ? NEG  : DODIVIDE.quotient :                           //              NOT /0   CORRECTLY SIGNED
+                                                64hffffffffffffffff;                                                         //              /0       -1
+                    STATE = 16;
+                }
+            }
+            case 4: { READY = 1; STATE = 1; }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+unit divide_commit(
+    output  uint1               READY,
+    input   uint1               ACK,
+    output  uint32              RD,
+
+    input   uint64              RESULT,
+    input   uint5               DESTREG,
+
+    output  uint1               EXECUTE_ALUDIVIDE_RESULT_READY,
+    input   uint1               COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK,
+    output  uint64              COMMIT_ALUDIVIDE_RESULT,
+    output  uint5               COMMIT_ALUDIVIDE_REGISTER
+) <reginputs> {
+    uint3   STATE = 1;
+
+    EXECUTE_ALUDIVIDE_RESULT_READY := STATE[2,1];
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                if( ACK ) {
+                    READY = 0; STATE = 2; RD[ DESTREG, 1 ] = 1;
+                }
+            }
+            case 1: {
+                COMMIT_ALUDIVIDE_RESULT = RESULT;
+                COMMIT_ALUDIVIDE_REGISTER = DESTREG;
+
+                STATE = 4;
+            }
+            case 2: { if( COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { RD = 0; READY = 1; STATE = 1; }
+    }
+}
+
+// INTEGER DIVISION
+unit dointegerdivide(
+    input   uint1   start,
+    output  uint1   busy(0),
+    input   uint6   startingbit,
+    input   uint64  dividend,
+    input   uint64  divisor,
+    output  uint64  quotient,
+    output  uint64  remainder
+) <reginputs> {
+    uint2   STATE = 1;
+        $$ STATE_INT_DIV_WAIT = 1
+        $$ STATE_INT_DIV_CALC = 2
+
+    uint7   bit = -1;
+    uint7   bit_NEXT <:: bit - 1;
+    uint64  temporary <:: { remainder[0,63], dividend[bit,1] };
+    uint1   bitresult <:: __unsigned(temporary) >= __unsigned(divisor);
+    uint64  remainder_NEXT <:: __unsigned(temporary) - ( bitresult ? __unsigned(divisor) : 0 );
+    uint1   FINISHED <:: &bit;
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                busy = start; if( start ) {
+                    quotient = 0; bit = startingbit; remainder = 0; STATE = $STATE_INT_DIV_CALC$;
+                }
+            }
+            case 1: {
+                if( FINISHED ) {
+                    busy = 0; STATE = $STATE_INT_DIV_WAIT$;
+                } else {
+                    remainder = remainder_NEXT; quotient[ bit, 1 ] = bitresult; bit = bit_NEXT;
+                }
+            }
+        }
+
+        if( reset ) { busy = 0; STATE = 1; }
+    }
+}

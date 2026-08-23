@@ -1,0 +1,436 @@
+// AGU_FLAGS = { CUSTOM, STORE, LOAD, JUMP, FPU_FAST, FPU_CONVERT, FPU, FENCE, CSR, ATOMIC, ALU_SIGNX, ALU_FAST, ALU, WR_F, WR }
+$$ AG_IS_WR =          "AGU_FLAGS[ 0,1]"
+$$ AG_IS_WR_F =        "AGU_FLAGS[ 1,1]"
+$$ AG_IS_ALU =         "AGU_FLAGS[ 2,1]"
+$$ AG_IS_ALU_FAST =    "AGU_FLAGS[ 3,1]"
+$$ AG_IS_ALU_SIGNX =   "AGU_FLAGS[ 4,1]"
+$$ AG_IS_ATOMIC =      "AGU_FLAGS[ 5,1]"
+$$ AG_IS_CSR =         "AGU_FLAGS[ 6,1]"
+$$ AG_IS_FENCE =       "AGU_FLAGS[ 7,1]"
+$$ AG_IS_FPU =         "AGU_FLAGS[ 8,1]"
+$$ AG_IS_FPU_CONVERT = "AGU_FLAGS[ 9,1]"
+$$ AG_IS_FPU_FAST =    "AGU_FLAGS[10,1]"
+$$ AG_IS_JUMP =        "AGU_FLAGS[11,1]"
+$$ AG_IS_LOAD =        "AGU_FLAGS[12,1]"
+$$ AG_IS_STORE =       "AGU_FLAGS[13,1]"
+$$ AG_IS_BRANCH =      "AGU_FLAGS[14,1]"
+$$ AG_IS_CUSTOM =      "AGU_FLAGS[15,1]"
+
+unit cpu_agu(
+    input   uint1               clock_decode,
+
+    input   uint1               CPU_FENCE,
+    dualport_bram_port1         PRED_TABLE,
+
+    $$for i=1,3 do
+    input   uint64              AGU_I$i$,
+    input   uint64              AGU_F$i$,
+    output  uint64              EXECUTE_ALU_I$i$,
+    output  uint64              DISPATCH_I$i$,
+    output  uint64              DISPATCH_F$i$,
+    $$end
+
+    output  uint1               AGU_READY,
+    input   uint1               AGU_ACK,
+
+    input   uint$addr_width$    AGU_PC,
+    input   uint$addr_width$    AGU_PC_INC,
+    input   uint$addr_width$    AGU_BA,
+    input   uint32              AGU_INSTRUCTION,
+    input   uint16              AGU_FLAGS,
+    input   uint14              AGU_ALUOP,
+    input   uint3               AGU_PRED_TABLE,
+
+    input   uint1               EXECUTE_FASTBASE_READY,
+    output  uint1               EXECUTE_FASTBASE_ACK,
+    output  uint1               EXECUTE_FASTBASE_UI_J,
+    output  uint5               EXECUTE_FASTBASE_DESTREG,
+    output  int64               EXECUTE_FASTBASE_RESULT,
+    output  uint2               FENCE,
+
+    input   uint1               EXECUTE_ALU_READY,
+    output  uint1               EXECUTE_ALU_ACK,
+    output  uint32              EXECUTE_ALU_INSTRUCTION,
+    output  uint14              EXECUTE_ALU_ALUOP,
+    output  uint1               EXECUTE_ALU_SIGNX,
+    output  uint1               EXECUTE_ALU_CUSTOM,
+    output  uint2               EXECUTE_ALU_COMPARE,
+
+    input   uint1               DISPATCH_READY,
+    output  uint1               DISPATCH_ACK,
+    output  uint32              DISPATCH_INSTRUCTION,
+    output  uint16              DISPATCH_FLAGS,
+    output  uint64              DISPATCH_IMM_LA_SA,
+
+    output  uint$addr_width$    AGU_BRANCH_JUMP,
+    output  uint1               AGU_DO_BRANCH_JUMP,
+    output  uint1               BP_CLS,
+    output  uint1               BP_FLUSH,
+    output  uint1               BP_TAKEN,
+
+    input   uint$addr_width$    CSR_MEPC,
+    output  uint1               CSR_IRQ_END,
+    input   uint1               CSR_IRQ_END_ACK,
+
+    output  uint64              AGU_RD                                                                                          // INSTRUCTION IN AGU IS WRITING TO { FLOAT, RD }
+) <reginputs> {
+    uint64              IMM_LA_SA <:: (                                                                                         // LOAD STORE JALR IMMEDIATE ADDRESS CALCULATION
+                                        $AG_IS_ATOMIC$ ? 0 :
+                                        $AG_IS_CUSTOM$ ? AGU_I1 :
+                                        $AG_IS_STORE$ ? { {52{AGU_INSTRUCTION[31,1]}}, Stype( AGU_INSTRUCTION ).imm_b_11_5, Stype( AGU_INSTRUCTION ).imm_b_4_0 } :
+                                                        { {52{AGU_INSTRUCTION[31,1]}}, Itype(AGU_INSTRUCTION).imm }
+                                      )
+                                      +
+                                      (
+                                        $AG_IS_CUSTOM$ ? ( ( AGU_INSTRUCTION[28,1] ? AGU_I2[0,32] : AGU_I2 ) << AGU_INSTRUCTION[25,2] ) :
+                                        ( $AG_IS_LOAD$ | $AG_IS_STORE$ | $AG_IS_JUMP$ ) ? AGU_I1 : 0
+
+                                      );
+    uint1               TAKE_BRANCH <:: ( Rtype(AGU_INSTRUCTION).f3[0,1] ^ I1I2_COMPARE.FLAGS[ Rtype(AGU_INSTRUCTION).f3[1,2], 1 ] );   // BRANCH TAKEN?
+
+    uint7               STATE = 1;
+
+    i_compare I1I2_COMPARE <@clock_decode> (                                                                                    // INTEGER REGISTER COMPARISON FLAGS FOR BRANCH
+        I_1 <: AGU_I1,
+        I_2 <: AGU_I2,
+        IMMEDIATE <: IMM_LA_SA,
+        REGREG <: AGU_INSTRUCTION[5,1]
+    );
+
+    branch_predict_write BP_W(                                                                                                  // BRANCH PREDICTION TABLE UPDATE MODULE
+        PRED_TABLE <:> PRED_TABLE,
+        AGU_PRED_TABLE <: AGU_PRED_TABLE,
+        TAKE_BRANCH <: TAKE_BRANCH,
+        PC <: AGU_PC,
+        UPDATE <: STATE[1,1],
+        CLS :> BP_CLS
+    );
+
+    alu_latch ALU(
+        clock_decode <: clock_decode,
+        LATCH <: EXECUTE_ALU_READY,
+
+        AGU_INSTRUCTION <: AGU_INSTRUCTION,
+        AG_IS_ALU_SIGNX <: $AG_IS_ALU_SIGNX$,
+        AG_IS_ALU_CUSTOM <: $AG_IS_CUSTOM$,
+        AGU_I1 <: AGU_I1,
+        AGU_I2 <: AGU_I2,
+        AGU_I3 <: AGU_I3,
+        AGU_COMPARE <: I1I2_COMPARE.FLAGS,
+
+        EXECUTE_ALU_I1 :> EXECUTE_ALU_I1,
+        EXECUTE_ALU_I2 :> EXECUTE_ALU_I2,
+        EXECUTE_ALU_I3 :> EXECUTE_ALU_I3,
+        EXECUTE_ALU_INSTRUCTION :> EXECUTE_ALU_INSTRUCTION,
+        EXECUTE_ALU_ALUOP :> EXECUTE_ALU_ALUOP,
+        EXECUTE_ALU_SIGNX :> EXECUTE_ALU_SIGNX,
+        EXECUTE_ALU_CUSTOM :> EXECUTE_ALU_CUSTOM,
+        EXECUTE_ALU_COMPARE :> EXECUTE_ALU_COMPARE
+    );
+
+    dispatch_latch DISPATCH(
+        LATCH <: DISPATCH_READY,
+
+        AGU_INSTRUCTION <: AGU_INSTRUCTION,
+        AGU_FLAGS <: AGU_FLAGS,
+        IMM_LA_SA <: IMM_LA_SA,
+        $$for i=1,3 do
+        AGU_I$i$ <: AGU_I$i$,
+        DISPATCH_I$i$ :> DISPATCH_I$i$,
+        AGU_F$i$ <: AGU_F$i$,
+        DISPATCH_F$i$ :> DISPATCH_F$i$,
+        $$end
+        DISPATCH_INSTRUCTION :> DISPATCH_INSTRUCTION,
+        DISPATCH_FLAGS :> DISPATCH_FLAGS,
+        DISPATCH_IMM_LA_SA :> DISPATCH_IMM_LA_SA
+    );
+
+    fastbase_latch FASTBASE(
+        LATCH <: EXECUTE_FASTBASE_READY,
+
+        AGU_PC <: AGU_PC,
+        AGU_PC_INC <: AGU_PC_INC,
+        AGU_INSTRUCTION <: AGU_INSTRUCTION,
+
+        EXECUTE_FASTBASE_UI_J :> EXECUTE_FASTBASE_UI_J,
+        EXECUTE_FASTBASE_DESTREG :> EXECUTE_FASTBASE_DESTREG,
+        EXECUTE_FASTBASE_RESULT :> EXECUTE_FASTBASE_RESULT
+    );
+
+    EXECUTE_ALU_ACK := 0; DISPATCH_ACK := 0; EXECUTE_FASTBASE_ACK := 0;
+
+    BP_FLUSH := 0; BP_TAKEN := 0;                                                                                               // BRANCH PREDICTION FLUSH / TAKEN FLAGS
+    BP_W.INVALIDATE := reset | CPU_FENCE;                                                                                       // INVALIDATE( after load ) CPU BRANCH PREDICTION TABLE
+
+    AGU_BRANCH_JUMP := $AG_IS_BRANCH$ ? TAKE_BRANCH ? AGU_BA : AGU_PC_INC :                                                     // SET CORRECT BRANCH ADDRESS FOR THE FETCH UNIT
+                          $AG_IS_CSR$ ? CSR_MEPC :                                                                              //             MRET
+                                        IMM_LA_SA;                                                                              //             JAL / JALR
+    AGU_DO_BRANCH_JUMP := 0;                                                                                                    // SIGNAL JUMP ADDRESS READY FOR FETCH UNIT
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                if( AGU_ACK ) {                                                                                                 // WAIT FOR REGISTERS TO ACKNOWLEDGE INSTRUCTION IS READY
+                    AGU_READY = 0;                                                                                              //  HALT REGISTERS SENDING MORE INSTRUCTIONS
+                    AGU_RD[ { $AG_IS_WR_F$, $AG_IS_WR$ ? Rtype( AGU_INSTRUCTION ).rd : 5b00000 }, 1 ] = 1;                              //  FLAG RD FOR CONTENTION
+
+                    if( $AG_IS_BRANCH$ ) {
+                        STATE = 2;
+                    } else {
+                        if( $AG_IS_CSR$ & $AG_IS_JUMP$ ) {
+                            STATE = 8; CSR_IRQ_END = ( $AG_IS_CSR$ & $AG_IS_JUMP$ );                                            //  MRET, SIGNAL END OF IRQ
+                        } else {
+                            if( $AG_IS_LOAD$ | $AG_IS_STORE$ | $AG_IS_ATOMIC$ | $AG_IS_CSR$ | $AG_IS_FPU$ | ( $AG_IS_ALU$ & ~$AG_IS_ALU_FAST$ ) ) {
+                                if( DISPATCH_READY ) { DISPATCH_ACK = 1; AGU_READY = 1; } else { STATE = 16; }
+                            } else {
+                                if( $AG_IS_ALU$ ) {
+                                    if( EXECUTE_ALU_READY ) {  EXECUTE_ALU_ACK = 1; AGU_READY = 1; } else { STATE = 32; }
+                                } else {
+                                    if( $AG_IS_FENCE$ ) {
+                                        FENCE = { |Rtype( AGU_INSTRUCTION ).f7[1,2], ~Rtype( AGU_INSTRUCTION ).f3[0,1] };
+                                        AGU_READY = 1;
+                                    } else {
+                                        if( EXECUTE_FASTBASE_READY ) { EXECUTE_FASTBASE_ACK = 1; AGU_READY = 1; } else { STATE = 64; }
+                                        AGU_DO_BRANCH_JUMP = $AG_IS_JUMP$;                                                      //  JALR, SIGNAL FETCH UNIT TO RESTART AT THE NEW PC
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                } else {
+                    AGU_RD = 0;
+                }
+            }
+
+            case 1: {
+                if( ( AGU_PRED_TABLE[2,1] ? AGU_PRED_TABLE[1,1] : AGU_INSTRUCTION[31,1] ) == TAKE_BRANCH ) {                    // CHECK IF BRANCH PREDICTION WAS CORRECT
+                    BP_TAKEN = 1; AGU_READY = 1; STATE = 1;                                                                     //  FLAG TAKEN IF PREDICTION CORRECT ( DON'T DISPATCH )
+                } else {
+                    BP_FLUSH = 1; STATE = 4;                                                                                    //  FLUSH IF PREDICTION INCORRECT ( DON'T DISPATCH )
+                }
+            }
+            case 2: { AGU_READY = 1; STATE = 1; }                                                                               // FINISH FLUSH AND RESET AGU PIPELINE STAGE
+
+            case 3: { if( CSR_IRQ_END_ACK ) { CSR_IRQ_END = 0; AGU_DO_BRANCH_JUMP = 1; AGU_READY = 1; STATE = 1; } }            //  MRET, WAIT FOR IRQ END ACK, SIGNAL FETCH TO RESTART WITH PC = MEPC
+
+            case 4: { if( DISPATCH_READY ) { DISPATCH_ACK = 1; AGU_READY = 1; STATE = 1; } }                                    // SEND INSTRUCTION TO DISPATCH
+            case 5: { if( EXECUTE_ALU_READY ) { EXECUTE_ALU_ACK = 1; AGU_READY = 1; STATE = 1; } }                              // SEND INSTRUCTION TO ALU ( not DIVIDE )
+            case 6: { if( EXECUTE_FASTBASE_READY ) { EXECUTE_FASTBASE_ACK = 1; AGU_READY = 1; STATE = 1; } }                    // SEND INSTRUCTION TO FASTBASE
+
+        }
+
+        if( reset ) { AGU_RD = 0; AGU_READY = 1; STATE = 1; FENCE = 0; }
+    }
+}
+
+// INTEGER COMPARISONS
+unit i_compare(
+    input   uint64              I_1,
+    input   uint64              I_2,
+    input   uint64              IMMEDIATE,
+    input   uint1               REGREG,
+    output  uint4               FLAGS
+) <reginputs> {
+    FLAGS := {
+        ( __unsigned( I_1 ) < __unsigned( REGREG ? I_2 : IMMEDIATE ) ),                                                         //  LTU
+        (   __signed( I_1 ) <   __signed( REGREG ? I_2 : IMMEDIATE ) ),                                                         //  LT
+        1b0,                                                                                                                    //  UNUSED
+        ( I_1 == ( REGREG ? I_2 : IMMEDIATE ) )                                                                                 //  EQ
+    };
+}
+
+unit branch_predict_write(
+    dualport_bram_port1         PRED_TABLE,
+    input   uint3               AGU_PRED_TABLE,
+    input   uint1               TAKE_BRANCH,
+    input   uint$addr_width$    PC,
+    input   uint1               UPDATE,
+    input   uint1               INVALIDATE,
+    output  uint1               CLS
+) <reginputs> {
+    uint$BPaddrwidth+1$   COUNT = 0;
+    brom uint2 BP_UPDATE[16] = {                                                                                                // UPDATES FOR BRANCH PREDICTION TABLE
+        2b00,                                                                                                                   // PRED_TABLE ==    000     TAKE_BRANCH = 0
+        2b00,                                                                                                                   // PRED_TABLE ==    001     TAKE_BRANCH = 0
+        2b00,                                                                                                                   // PRED_TABLE ==    010     TAKE_BRANCH = 0
+        2b00,                                                                                                                   // PRED_TABLE ==    011     TAKE_BRANCH = 0
+        2b00,                                                                                                                   // PRED_TABLE ==    100     TAKE_BRANCH = 0
+        2b00,                                                                                                                   // PRED_TABLE ==    101     TAKE_BRANCH = 0
+        2b01,                                                                                                                   // PRED_TABLE ==    110     TAKE_BRANCH = 0
+        2b10,                                                                                                                   // PRED_TABLE ==    111     TAKE_BRANCH = 0
+        2b01,                                                                                                                   // PRED_TABLE ==    000     TAKE_BRANCH = 1
+        2b01,                                                                                                                   // PRED_TABLE ==    001     TAKE_BRANCH = 1
+        2b01,                                                                                                                   // PRED_TABLE ==    010     TAKE_BRANCH = 1
+        2b01,                                                                                                                   // PRED_TABLE ==    011     TAKE_BRANCH = 1
+        2b01,                                                                                                                   // PRED_TABLE ==    100     TAKE_BRANCH = 1
+        2b10,                                                                                                                   // PRED_TABLE ==    101     TAKE_BRANCH = 1
+        2b11,                                                                                                                   // PRED_TABLE ==    110     TAKE_BRANCH = 1
+        2b11                                                                                                                    // PRED_TABLE ==    111     TAKE_BRANCH = 1
+    };
+    BP_UPDATE.addr := { AGU_PRED_TABLE, TAKE_BRANCH };
+
+    PRED_TABLE.addr1 := CLS ? COUNT : PC[1,$BPaddrwidth$];
+
+    PRED_TABLE.wdata1 := CLS ? 0 : { PC[$BPpartaddressstart$,$BPpartaddresswidth$], 1b1, BP_UPDATE.rdata };
+    PRED_TABLE.wenable1 := CLS | UPDATE;
+
+    CLS := INVALIDATE | ( COUNT != $BPsize$ );
+    COUNT := INVALIDATE ? 0 : COUNT + CLS;
+}
+
+
+unit alu_latch(
+    input   uint1               clock_decode,
+    input   uint1               LATCH,
+
+    input   uint32              AGU_INSTRUCTION,
+    input   uint1               AG_IS_ALU_SIGNX,
+    input   uint1               AG_IS_ALU_CUSTOM,
+    input   uint64              AGU_I1,
+    input   uint64              AGU_I2,
+    input   uint64              AGU_I3,
+    input   uint4               AGU_COMPARE,
+
+    output  uint64              EXECUTE_ALU_I1,
+    output  uint64              EXECUTE_ALU_I2,
+    output  uint64              EXECUTE_ALU_I3,
+    output  uint32              EXECUTE_ALU_INSTRUCTION,
+    output  uint14              EXECUTE_ALU_ALUOP,
+    output  uint1               EXECUTE_ALU_SIGNX,
+    output  uint1               EXECUTE_ALU_CUSTOM,
+    output  uint2               EXECUTE_ALU_COMPARE
+) <reginputs> {
+    alu_decoder ALUFLAGS <@clock_decode> ( INSTRUCTION <: AGU_INSTRUCTION );                                                    // GENERATE ALU OPERATION FLAGS, DECODE F7/F3
+
+    always {
+        if( LATCH ) {
+            EXECUTE_ALU_INSTRUCTION = AGU_INSTRUCTION;
+            EXECUTE_ALU_ALUOP = ALUFLAGS.ALUOP;
+            EXECUTE_ALU_SIGNX = AG_IS_ALU_SIGNX;
+            EXECUTE_ALU_CUSTOM = AG_IS_ALU_CUSTOM;
+            EXECUTE_ALU_I1 = AGU_I1;
+            EXECUTE_ALU_I2 = ( AGU_INSTRUCTION[5,1] | AG_IS_ALU_CUSTOM ) ? AGU_I2 : { {52{AGU_INSTRUCTION[31,1]}}, Itype(AGU_INSTRUCTION).imm };
+            EXECUTE_ALU_I3 = AGU_I3;
+            EXECUTE_ALU_COMPARE = { AGU_COMPARE[3,1], AGU_COMPARE[2,1] };
+        }
+    }
+}
+
+unit dispatch_latch(
+    input   uint1               LATCH,
+
+    input   uint32              AGU_INSTRUCTION,
+    input   uint64              IMM_LA_SA,
+    input   uint16              AGU_FLAGS,
+
+    $$for i=1,3 do
+    input   uint64              AGU_I$i$,                                                                                           // INTEGER REGISTERS    PIPELINE INPUT
+    output  uint64              DISPATCH_I$i$,
+    $$end
+    $$for i=1,3 do
+    input   uint64              AGU_F$i$,                                                                                           // FLOAT REGISTERS      PIPELINE INPUT
+    output  uint64              DISPATCH_F$i$,
+    $$end
+    output  uint32              DISPATCH_INSTRUCTION,
+    output  uint16              DISPATCH_FLAGS,
+    output  uint64              DISPATCH_IMM_LA_SA,
+) <reginputs> {
+    always {
+        if( LATCH ) {
+            DISPATCH_I1 = AGU_I1;
+            DISPATCH_I2 = AGU_I2;
+            DISPATCH_I3 = AGU_I3;
+            DISPATCH_F1 = AGU_F1;
+            DISPATCH_F2 = AGU_F2;
+            DISPATCH_F3 = AGU_F3;
+            DISPATCH_IMM_LA_SA = IMM_LA_SA;
+            DISPATCH_INSTRUCTION = AGU_INSTRUCTION;
+            DISPATCH_FLAGS = AGU_FLAGS;
+        }
+    }
+}
+
+unit fastbase_latch(
+    input   uint1               LATCH,
+
+    input   uint$addr_width$    AGU_PC,
+    input   uint$addr_width$    AGU_PC_INC,
+    input   uint32              AGU_INSTRUCTION,
+
+    output  uint1               EXECUTE_FASTBASE_UI_J,
+    output  uint5               EXECUTE_FASTBASE_DESTREG,
+    output  int64               EXECUTE_FASTBASE_RESULT
+) <reginputs> {
+    uint64              LUIAUIPC <:: { {32{AGU_INSTRUCTION[31,1]}}, Utype(AGU_INSTRUCTION).imm_b_31_12, 12b0 } +                // ADDRESS GENERATION   AUIPC LUI
+                                     ( AGU_INSTRUCTION[5,1] ? 0 : AGU_PC );
+
+    always {
+        if( LATCH ) {
+            EXECUTE_FASTBASE_UI_J = AGU_INSTRUCTION[6,1];
+            EXECUTE_FASTBASE_DESTREG = Rtype( AGU_INSTRUCTION ).rd;
+            EXECUTE_FASTBASE_RESULT = AGU_INSTRUCTION[6,1] ? AGU_PC_INC : LUIAUIPC;                                             // SEND RESULT DIRECTLY TO FASTBASE EXECUTION UNIT
+        }
+    }
+}
+
+
+// CONVERT XTHEAD INSTRUCTIONS TO RISC-V EXTENSION INSTRUCIONS WHERE APPLICABLE
+//
+//  F3 == 001
+//      BITS [27,5]
+//      00000   TH.ADDSL -> SHxADD
+//      00010   TH.SRRI -> RORI TH.SRRIW -> RORIW
+//      00100   TH.MULA  TH.MULAW TH.MULS TH.MULSW
+//      00101   TH.MULAH TH.MULSH
+//      01000   TH.MVEQZ TH.MVNEZ
+//      10000   TH.FF0 TH.FF1 TH.REV -> REV8 TH.TSTNBZ
+//      10001   TH.TST -> BEXTI
+//      10010   TH.REVW
+//  F3 == 010
+//      TH.EXT
+//  F3 == 011
+//      TH.EXTU
+
+// ALU OPERATION FLAGS
+unit alu_decoder(
+    input   uint32              INSTRUCTION,
+    output  uint14              ALUOP
+) <reginputs> {
+    ALUOP := ( INSTRUCTION[2,5] == 5b00010 ) ?
+                ( Rtype(INSTRUCTION).f3 == 3b001 ) ?
+                    {
+                        1b0,                                                                                                    // ( doadduw )
+                        1b0,                                                                                                    // ( doalt )
+                        1b0,                                                                                                    // ( doext )
+                        Rtype(INSTRUCTION).f7[2,5] == 5b10010,                                                                  // th.revw (dorev)
+                        1b0,                                                                                                    // ( doset )
+                        Rtype(INSTRUCTION).f7[2,5] == 5b01000,                                                                  // th.mveqz th.mvnez (docond)
+                        ( Rtype(INSTRUCTION).f7[2,5] == 5b10000 ) & |INSTRUCTION[25,2],                                         // th.ff0 th.ff1 (docountsignx)
+                        1b0,                                                                                                    // ( dominmax )
+                        ( Rtype(INSTRUCTION).f7[2,5] == 5b00100 ) | ( Rtype(INSTRUCTION).f7[2,5] == 5b00101 ),                  // th.mul[A|S][W][H] ( domul )
+                        ( Rtype(INSTRUCTION).f7[2,5] == 5b10000 ) & ~|INSTRUCTION[25,2],                                        // th.tstnbz (doorcxperm)
+                        1b0,                                                                                                    // ( dopack )
+                        1b0,                                                                                                    // ( dorotate )
+                        1b0,                                                                                                    // ( doshxadd )
+                        1b0                                                                                                     // ( dosra )
+                    } :
+                    0 :
+             {                                                                                                                  // DECODE ALU INSTRUCTIONS
+                INSTRUCTION[3,1] & INSTRUCTION[5,1] & ( ( Rtype(INSTRUCTION).f7 == 7b0000100 ) |                                // doadduw      32-BIT ( REG - REG )  ADD.UW
+                ( Rtype(INSTRUCTION).f7 == 7b0010000 ) ),                                                                       //                                    SHxADD.UW
+                INSTRUCTION[5,1] & ( Rtype(INSTRUCTION).f7 == 7b0100000 ),                                                      // doalt        SUB ANDN ORN XNOR ( REG - REG )
+                ( Rtype(INSTRUCTION).f7[1,6] == 6b010010 ),                                                                     // doext        BCLR BCLRI BEXT BEXTI
+                ( Rtype(INSTRUCTION).f7[1,6] == 6b011010 ),                                                                     // dorev        BINV BINVI REV8 BREV8
+                ( Rtype(INSTRUCTION).f7[1,6] == 6b001010 ),                                                                     // doset        ( F3 == 001 ) BSET BSETI
+                INSTRUCTION[5,1] & ( Rtype(INSTRUCTION).f7 == 7b0000111 ),                                                      // docond       ZICOND czero.eq or czero.nez
+                ( Rtype(INSTRUCTION).f7 == 7b0110000 ),                                                                         // docountsignx CLZ CPOP CTZ SEXT.B SEXT.H ( immediate only )
+                INSTRUCTION[5,1] & ( Rtype(INSTRUCTION).f7 == 7b0000101 ),                                                      // dominmax     MAX MAXU MIN MINU ( register - register only )
+                INSTRUCTION[5,1] & ( Rtype(INSTRUCTION).f7 == 7b0000001 ),                                                      // domul        MULTIPLICATION
+                ( Rtype(INSTRUCTION).f7 == 7b0010100 ),                                                                         // doorcxperm   ( F3 = 101 ) ORC.B, XPERM.B XPERM.N
+                ( Rtype(INSTRUCTION).f7 == 7b0000100 ),                                                                         // dopack       ZEXT.H PACK PACKH PACKW ( ZEXT.H when rs2 == 0 )
+                ( Rtype(INSTRUCTION).f7[1,6] == 6b011000 ),                                                                     // dorotate     ROL ROR RORI
+                INSTRUCTION[5,1] & ( Rtype(INSTRUCTION).f7 == 7b0010000 ),                                                      // doshxadd     SH1ADD SH2ADD SH3ADD ( register - register only )
+                ( Rtype(INSTRUCTION).f7[1,6] == 6b010000 )                                                                      // dosra        SRA SRAI
+             };
+}

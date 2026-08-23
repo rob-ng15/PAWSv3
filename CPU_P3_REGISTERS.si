@@ -1,0 +1,181 @@
+// REGISTERS_FLAGS = { CUSTOM, STORE, LOAD, JUMP, FPU_FAST, FPU_CONVERT, FPU, FENCE, CSR, ATOMIC, ALU_SIGNX, ALU_FAST, ALU, WR_F, WR }
+$$ REG_IS_WR =          "REGISTERS_FLAGS[ 0,1]"
+$$ REG_IS_WR_F =        "REGISTERS_FLAGS[ 1,1]"
+$$ REG_IS_ALU =         "REGISTERS_FLAGS[ 2,1]"
+$$ REG_IS_ALU_FAST =    "REGISTERS_FLAGS[ 3,1]"
+$$ REG_IS_ALU_SIGNX =   "REGISTERS_FLAGS[ 4,1]"
+$$ REG_IS_ATOMIC =      "REGISTERS_FLAGS[ 5,1]"
+$$ REG_IS_CSR =         "REGISTERS_FLAGS[ 6,1]"
+$$ REG_IS_FENCE =       "REGISTERS_FLAGS[ 7,1]"
+$$ REG_IS_FPU =         "REGISTERS_FLAGS[ 8,1]"
+$$ REG_IS_FPU_CONVERT = "REGISTERS_FLAGS[ 9,1]"
+$$ REG_IS_FPU_FAST =    "REGISTERS_FLAGS[10,1]"
+$$ REG_IS_JUMP =        "REGISTERS_FLAGS[11,1]"
+$$ REG_IS_LOAD =        "REGISTERS_FLAGS[12,1]"
+$$ REG_IS_STORE =       "REGISTERS_FLAGS[13,1]"
+$$ REG_IS_BRANCH =      "REGISTERS_FLAGS[14,1]"
+$$ REG_IS_ALU_CUSTOM =  "REGISTERS_FLAGS[15,1]"
+
+unit cpu_registers(
+    input   uint1               clock_decode,
+
+    input   uint1               BP_FLUSH,
+
+    $$for i=1,3 do
+    simple_dualport_bram_port0 I$i$,                                                                                            // INTEGER REGISTERS READ PORT
+    output  uint64              AGU_I$i$,
+    $$end
+    output  uint1               REGISTERS_READY,
+    input   uint1               REGISTERS_ACK,
+
+    input   uint$addr_width$    REGISTERS_PC,
+    input   uint$addr_width$    REGISTERS_PC_INC,
+    input   uint$addr_width$    REGISTERS_BA,
+    input   uint32              REGISTERS_INSTRUCTION,
+    input   uint16              REGISTERS_FLAGS,
+    input   uint14              REGISTERS_ALUOP,
+    input   uint3               REGISTERS_SR_F,
+    input   uint3               REGISTERS_SR,
+    input   uint3               REGISTERS_PRED_TABLE,
+
+    input   uint1               AGU_READY,
+    output  uint1               AGU_ACK,
+
+    output  uint$addr_width$    AGU_PC,
+    output  uint$addr_width$    AGU_PC_INC,
+    output  uint$addr_width$    AGU_BA,
+    output  uint32              AGU_INSTRUCTION,
+    output  uint1               AGU_COMPRESSED,
+    output  uint16              AGU_FLAGS,
+    output  uint3               AGU_PRED_TABLE,
+
+    input   uint64              AGU_RD,                                                                                         // INSTRUCTION IN AGU IS WRITING TO
+    input   uint64              DISPATCH_RD,                                                                                    // INSTRUCTION IN DISPATCH IS WRITING TO
+    input   uint32              EXECUTE_ALUDIVIDE_RD,                                                                           // INSTRUCTION IN ALUDIVIDE IS WRITING TO
+    input   uint32              EXECUTE_ALU_RD,                                                                                 // INSTRUCTION IN ALU IS WRITING TO
+    input   uint64              EXECUTE_CSRFPU_RD,                                                                              // INSTRUCTION IN CSRFPU IS WRITING TO
+    input   uint32              EXECUTE_FASTBASE_RD,                                                                            // INSTRUCTION IN FASTBASE IS WRITING TO
+    input   uint64              EXECUTE_LSA_RD,                                                                                 // INSTRUCTION IN LOAD/STORE/ATOMIC IS WRITING TO
+
+    input   uint32              COMMIT_I_RD,                                                                                    // INSTRUCTION IN COMMIT I IS WRITING TO
+    input   uint64              COMMIT_F_RD                                                                                     // INSTRUCTION IN COMMIT F IS WRITING TO
+) <reginputs> {
+    uint3               STATE = 1;
+
+    uint64              SR_MASK <:: ( 0 |
+                                        ( REGISTERS_SR[0,1] ? ( 1 << { REGISTERS_SR_F[0,1],  Rtype( REGISTERS_INSTRUCTION ).sr1 } ) : 0 ) |     // READ AFTER WRITE HAZARD DETECTION
+                                        ( REGISTERS_SR[1,1] ? ( 1 << { REGISTERS_SR_F[1,1],  Rtype( REGISTERS_INSTRUCTION ).sr2 } ) : 0 ) |
+                                        ( REGISTERS_SR[2,1] ? (
+                                            1 << { REGISTERS_SR_F[2,1], $REG_IS_ALU_CUSTOM$ ? R4type( REGISTERS_INSTRUCTION ).rd :
+                                                                                              R4type( REGISTERS_INSTRUCTION ).sr3 }
+                                        ) : 0 ) |
+                                        ( $REG_IS_WR$       ? ( 1 << {       $REG_IS_WR_F$,  Rtype( REGISTERS_INSTRUCTION ).rd  } ) : 0 )       // WRITE AFTER WRITE HAZARD DETECTION
+                                    ) & 64hFFFFFFFFFFFFFFFE;
+    uint64              RD_MASK <:: (
+                                        AGU_RD |
+                                        DISPATCH_RD |
+                                        EXECUTE_ALUDIVIDE_RD |
+                                        EXECUTE_ALU_RD |
+                                        EXECUTE_CSRFPU_RD |
+                                        EXECUTE_FASTBASE_RD |
+                                        EXECUTE_LSA_RD |
+                                        COMMIT_I_RD |
+                                        { COMMIT_F_RD, 32h00000000 }
+                                    ) & 64hFFFFFFFFFFFFFFFE;
+
+    agu_latch AGU(
+        clock_decode <: clock_decode,
+        LATCH <: AGU_READY,
+
+        $$for i=1,3 do
+        I$i$ <:> I$i$,                                                                                                          //  CPU INTEGER REGISTERS ( READ )
+        AGU_I$i$ :> AGU_I$i$,
+        $$end
+
+        REGISTERS_PC <: REGISTERS_PC,
+        REGISTERS_PC_INC <: REGISTERS_PC_INC,
+        REGISTERS_BA <: REGISTERS_BA,
+        REGISTERS_FLAGS <: REGISTERS_FLAGS,
+        REGISTERS_INSTRUCTION <: REGISTERS_INSTRUCTION,
+        REGISTERS_PRED_TABLE <: REGISTERS_PRED_TABLE,
+
+        AGU_PC :> AGU_PC,
+        AGU_PC_INC :> AGU_PC_INC,
+        AGU_BA :> AGU_BA,
+        AGU_INSTRUCTION :> AGU_INSTRUCTION,
+        AGU_COMPRESSED :> AGU_COMPRESSED,
+        AGU_FLAGS :> AGU_FLAGS,
+        AGU_PRED_TABLE :> AGU_PRED_TABLE
+    );
+
+    AGU_ACK := STATE[1,1] & AGU_READY;                                                                                          // ACKNOWLEDGE AGU STAGE ACCEPTING INSTRUCTION
+
+    always {
+        uint1   LOCKED = uninitialised;
+
+        onehot( STATE ) {
+            case 0: {
+                if( REGISTERS_ACK | LOCKED ) {                                                                                  // WAIT FOR DECODE TO ACKNOWLEDGE INSTRUCTION IS READY
+                    REGISTERS_READY = 0; LOCKED = 1;                                                                            //  HALT DECODE SENDING MORE INSTRUCTIONS
+                    if( ~|( SR_MASK & RD_MASK ) ) { STATE = 2; }
+                }
+            }
+            case 1: {
+                if( AGU_READY ) {
+                    REGISTERS_READY = 1; LOCKED = 0; STATE = 1;
+
+                }
+
+            }                                         // SEND INSTRUCTION TO AGU
+
+            case 2: { REGISTERS_READY = 1; STATE = 1; }                                                                         // BP_FLUSH_COMPLETE
+        }
+
+        if( BP_FLUSH ) { AGU_ACK = 0; REGISTERS_READY = 0; STATE = 4; LOCKED = 0; }                                             // IF BP_FLUSH RESET THE PIPELINE
+        if( reset ) { AGU_ACK = 0; REGISTERS_READY = 1; STATE = 1; LOCKED = 0; }                                                // IF RESET RESET THE PIPELINE
+    }
+}
+
+unit agu_latch(
+    input   uint1               clock_decode,
+    input   uint1               LATCH,
+
+    $$for i=1,3 do
+    simple_dualport_bram_port0 I$i$,                                                                                            // INTEGER REGISTERS READ PORT
+    output  uint64              AGU_I$i$,
+    $$end
+
+    input   uint$addr_width$    REGISTERS_PC,
+    input   uint$addr_width$    REGISTERS_PC_INC,
+    input   uint$addr_width$    REGISTERS_BA,
+    input   uint32              REGISTERS_INSTRUCTION,
+    input   uint16              REGISTERS_FLAGS,
+    input   uint3               REGISTERS_PRED_TABLE,
+
+    output  uint$addr_width$    AGU_PC,
+    output  uint$addr_width$    AGU_PC_INC,
+    output  uint$addr_width$    AGU_BA,
+    output  uint32              AGU_INSTRUCTION,
+    output  uint1               AGU_COMPRESSED,
+    output  uint16              AGU_FLAGS,
+    output  uint3               AGU_PRED_TABLE
+) <reginputs> {
+    I1.addr0 :=  Rtype( REGISTERS_INSTRUCTION ).sr1;                                                                            // COPY REGISTERS ADDRESSES
+    I2.addr0 :=  Rtype( REGISTERS_INSTRUCTION ).sr2;
+    I3.addr0 :=  Rtype( REGISTERS_INSTRUCTION ).rd;
+
+    always {
+        if( LATCH ) {
+            AGU_I1 = I1.rdata0;
+            AGU_I2 = I2.rdata0;
+            AGU_I3 = I3.rdata0;
+
+            AGU_PC = REGISTERS_PC;
+            AGU_PC_INC = REGISTERS_PC_INC;
+            AGU_BA = REGISTERS_BA;
+            AGU_INSTRUCTION = REGISTERS_INSTRUCTION;
+            AGU_FLAGS = REGISTERS_FLAGS;
+            AGU_PRED_TABLE = REGISTERS_PRED_TABLE;
+        }
+    }
+}

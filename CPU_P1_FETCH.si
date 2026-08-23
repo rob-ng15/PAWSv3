@@ -1,0 +1,671 @@
+unit cpu_fetch(
+    input   uint1               clock_cache,
+    input   uint1               clock_decode,
+
+    dualport_bram_port0         PRED_TABLE,
+    input   uint1               BP_CLS,
+    input   uint1               BP_FLUSH,
+    input   uint1               BP_TAKEN,
+
+    output  uint1               CACHE_HALT,
+    input   uint1               HALT,
+
+    output  uint$addr_width$    MEM_ADDR_PC,
+    output  uint1               MEM_REQ_FETCH,
+    input   uint32              MEM_INSTRUCTION,
+    input   uint1               MEM_BUSY_FETCH,
+    input   uint1               MEM_ACK_FETCH,
+
+    input   uint$addr_width$    JUMP_PC,
+    input   uint1               JUMP_READY,
+
+    input   uint1               DECODE_READY,
+    output  uint1               DECODE_ACK,
+
+    output  uint$addr_width$    DECODE_PC,
+    output  uint$addr_width$    DECODE_PC_INC,
+    output  uint$addr_width$    DECODE_BA,
+    output  uint32              DECODE_INSTRUCTION,
+    output  uint3               DECODE_PRED_TABLE,
+
+    input   uint1               CPU_FENCE,
+    input  uint$addr_width$     CSR_MTVEC,
+    input   uint1               CSR_IRQ_PENDING,
+    input   uint4               CSR_IRQ_VECTOR,
+    output  uint1               CSR_IRQ_ACK,
+    input   uint1               CSR_IRQ_ACK_ACK,
+    output  uint$addr_width$    CSR_NEW_MEPC
+) <reginputs> {
+    uint$addr_width$    PC = uninitialised;
+    uint$addr_width$    IRQ_VECTOR <:: CSR_MTVEC[0,1] ? ( { CSR_MTVEC[2,$addr_width-2$], 2b00 } + { CSR_IRQ_VECTOR, 2b00 } ) : CSR_MTVEC;
+
+    uint12              STATE = 1;
+                        $$ STATE_FETCH_NEXT             = 1
+                        $$ STATE_FETCH_WAIT_MEM_ACK     = 2
+                        $$ STATE_FETCH_MEM_BUSY         = 4
+                        $$ STATE_FETCH_DECODE           = 8
+                        $$ STATE_FETCH_WAIT_JUMP        = 16
+                        $$ STATE_FETCH_IRQ_START        = 32
+                        $$ STATE_FETCH_WAIT_IRQ_ACK     = 64
+                        $$ STATE_FETCH_WAIT_IRQ_STARTED = 128
+                        $$ STATE_FETCH_WFI              = 256
+                        $$ STATE_FETCH_ECALL            = 512
+                        $$ STATE_FETCH_FLUSH            = 1024
+                        $$ STATE_FETCH_MULTI_2          = 2048
+
+    compressed00 COMPRESSED00 <@clock_decode> ( i16 <: MEM_INSTRUCTION[2,14] );                                                 // COMPRESSED INSTRUCTION EXPANDERS
+    compressed01 COMPRESSED01 <@clock_decode> ( i16 <: MEM_INSTRUCTION[2,14] );
+    compressed10 COMPRESSED10 <@clock_decode> ( i16 <: MEM_INSTRUCTION[2,14] );
+    custom_convert CUSTOM <@clock_decode> ( INSTRUCTION <: MEM_INSTRUCTION );
+    custom_multi MULTI <@clock_decode> ( INSTRUCTION <: THIS_INSTRUCTION );
+
+    uint1               IS_BRANCH <:: ( THIS_INSTRUCTION[2,5] == 5b11000 );
+    uint3               BRANCH_PENDING = uninitialised;
+    uint$addr_width$    BA <:: { {52{Btype(THIS_INSTRUCTION).imm_b_12}}, Btype(THIS_INSTRUCTION).imm_b_11, Btype(THIS_INSTRUCTION).imm_b_10_5, Btype(THIS_INSTRUCTION).imm_b_4_1, 1b0 } + PC;
+    uint$addr_width$    JA <:: { {43{Jtype(THIS_INSTRUCTION).imm_b_20}}, Jtype(THIS_INSTRUCTION).imm_b_19_12, Jtype(THIS_INSTRUCTION).imm_b_11, Jtype(THIS_INSTRUCTION).imm_b_10_1, 1b0 } + PC;
+    uint32              THIS_INSTRUCTION <: ICACHE.tagmatch ? { ICACHE.instruction, 2b11 } :
+                                            ( MEM_INSTRUCTION[0,2] == 2b00 ) ? { COMPRESSED00.i32, 2b11 } :
+                                            ( MEM_INSTRUCTION[0,2] == 2b01 ) ? { COMPRESSED01.i32, 2b11 } :
+                                            ( MEM_INSTRUCTION[0,2] == 2b10 ) ? { COMPRESSED10.i32, 2b11 } :
+                                                                               ( MEM_INSTRUCTION[0,7] == 7b0001011 ) ? CUSTOM.CNV_INSTRUCTION :
+                                                                               MEM_INSTRUCTION;
+    uint1               THIS_COMPRESSED <: ICACHE.tagmatch ? ICACHE.compressed : ~&MEM_INSTRUCTION[0,2];
+    uint$addr_width$    NEXT_PC <:: ( ICACHE.tagmatch ? ICACHE.compressed : ~&MEM_INSTRUCTION[0,2] ) ? PC + 2 : PC + 4;
+    uint1               THIS_MULTI <:: ( THIS_INSTRUCTION[2,5] == 5b00010 ) & ( ( Rtype(THIS_INSTRUCTION).f3 == 3b100 ) | ( Rtype(THIS_INSTRUCTION).f3 == 3b101 ) );
+    uint12              MULTI_OFFSET <:: ( THIS_INSTRUCTION[25,2] ) << ( &THIS_INSTRUCTION[27,2] ? 4 : 3 );
+    uint12              MULTI_OFFSET_2 <:: MULTI_OFFSET + ( &THIS_INSTRUCTION[27,2] ? 8 : 4 );
+    uint12              INDEX_INC <:: { {7{THIS_INSTRUCTION[24,1]}}, THIS_INSTRUCTION[20,5] } << THIS_INSTRUCTION[25,2];
+
+    simple_dualport_bram uint$32+L1Ipartaddresswidth$ L1cache <@clock_cache,@clock> [$L1Iblocks$] = uninitialized;              // SMALL ON CPU L1 CACHE - 1 per HART - RESET FENCE MEM IS 1
+    iL1cache_read ICACHE(
+        L1cache <:> L1cache,
+        ADDR <: PC,
+        CLS <: ICACHEW.CLS
+    );
+    iL1cache_write ICACHEW(
+        L1cache <:> L1cache,
+        ADDR <:: PC,
+        newinstruction <: THIS_INSTRUCTION[2,30],
+        newcompressed <: THIS_COMPRESSED,
+        CLS :> CACHE_HALT
+    );
+
+    branch_predict_read BP_R(                                                                                                   // SMALL ON CPU 2-BIT BRANCH PREDICTION TABLE
+        PRED_TABLE <:> PRED_TABLE,
+        PC <: PC,
+        CLS <: BP_CLS
+    );
+    branch_predict_address BP_A(                                                                                                // BRANCH PREDICTION ADDRESS GENERATION
+        TAGMATCH <: BP_R.TAGMATCH,
+        PREDICTION_DIR <: BP_R.PREDICTION[1,1],
+        INSTRUCTION_DIR <: THIS_INSTRUCTION[31,1],
+        BA <: BA, NO_BA <: NEXT_PC
+    );
+
+    cpu_fetch_csr FETCH_CSR( CSR <: CSR( THIS_INSTRUCTION ).csr );                                                              // SET FLAGS FOR CSR INSTRUCTION
+
+    ICACHEW.invalidate := reset | CPU_FENCE;                                                                                    // INVALIDATE( after load ) CPU L1 CACHE FLAG
+    ICACHEW.update := STATE[3,1] & ~ICACHE.tagmatch;
+
+    DECODE_ACK := 0;
+
+    always {
+        uint1   MULTI_STEP = uninitialised;
+
+        onehot( STATE ) {
+            case 0: {                                                                                                           // STATE_FETCH_NEXT
+                if( ~HALT ) {
+                    if( CSR_IRQ_PENDING & ~|BRANCH_PENDING ) {                                                                  // INTERRUPTS ONLY WHEN NO BRANCHES IN THE PIPELINE
+                        STATE = $STATE_FETCH_IRQ_START$;
+                    } else {
+                        MEM_ADDR_PC = PC; MULTI_STEP = 0;                                                                       //  SET PC
+                        if( ICACHE.tagmatch ) {
+                            STATE = $STATE_FETCH_DECODE$;                                                                       //  IN L1 CACHE
+                        } else {
+                            MEM_REQ_FETCH = 1; STATE = $STATE_FETCH_WAIT_MEM_ACK$;                                              //  FETCH FROM MEMORY
+                        }
+                    }
+                }
+            }
+
+            case 1: { if( MEM_ACK_FETCH ) { MEM_REQ_FETCH = 0; STATE = $STATE_FETCH_MEM_BUSY$; } }                              // STATE_FETCH_WAIT_MEM_ACK
+            case 2: { if( ~MEM_BUSY_FETCH ) { STATE = $STATE_FETCH_DECODE$; } }                                                 // STATE_FETCH_MEM_BUSY
+
+            case 3: {                                                                                                           // STATE_FETCH_DECODE
+                if( DECODE_READY ) {
+                    DECODE_PC = PC;
+                    DECODE_PC_INC = NEXT_PC;
+                    DECODE_BA = BA;
+                    DECODE_PRED_TABLE = { BP_R.TAGMATCH, BP_R.PREDICTION };
+
+                    if( THIS_MULTI & MULTI.FLAGS[0,1] ) {
+                        if( ( MULTI.FLAGS[4,1] & MULTI_STEP ) | ( MULTI.FLAGS[3,1] & ~MULTI_STEP ) ) {                          // PRE or POST INCREMENT
+                            DECODE_INSTRUCTION = {
+                                INDEX_INC,
+                                THIS_INSTRUCTION[15,5],
+                                3b000,
+                                THIS_INSTRUCTION[15,5],
+                                7b0010011
+                            };
+                        } else {
+                            if( |MULTI.FLAGS[3,2] ) {
+                                if( THIS_INSTRUCTION[12,1] ) {
+                                    DECODE_INSTRUCTION = {                                                                      // STORE INDEX PRE POST INCREMENT
+                                        7b0000000,
+                                        THIS_INSTRUCTION[7,5],
+                                        THIS_INSTRUCTION[15,5],
+                                        THIS_INSTRUCTION[29,3],
+                                        5b00000,
+                                        7b0100011
+                                    };
+                                } else {
+                                    DECODE_INSTRUCTION = {                                                                      // LOAD INDEX PRE POST INCREMENT
+                                        12b000000000000,
+                                        THIS_INSTRUCTION[15,5],
+                                        THIS_INSTRUCTION[29,3],
+                                        THIS_INSTRUCTION[7,5],
+                                        7b0000011
+                                    };
+                                }
+                            } else {
+                                if( THIS_INSTRUCTION[12,1] ) {
+                                    DECODE_INSTRUCTION = {                                                                      // STORE MEMORY PAIR
+                                        MULTI_STEP ? MULTI_OFFSET_2[5,7] : MULTI_OFFSET[5,7],
+                                        MULTI_STEP ? THIS_INSTRUCTION[20,5] : THIS_INSTRUCTION[7,5],
+                                        THIS_INSTRUCTION[15,5],
+                                        &THIS_INSTRUCTION[27,2] ? 3b011 : 3b010,
+                                        MULTI_OFFSET[0,5],
+                                        7b0100011
+                                    };
+                                } else {
+                                    DECODE_INSTRUCTION = {                                                                      // LOAD MEMORY PAIR
+                                        MULTI_STEP ? MULTI_OFFSET_2 : MULTI_OFFSET,
+                                        THIS_INSTRUCTION[15,5],
+                                        &THIS_INSTRUCTION[27,2] ? 3b011 : THIS_INSTRUCTION[28,1] ? 3b110 : 3b010,
+                                        MULTI_STEP ? THIS_INSTRUCTION[20,5] : THIS_INSTRUCTION[7,5],
+                                        7b0000011
+                                    };
+                                }
+                            }
+                        }
+
+                        if( MULTI_STEP ) {
+                            PC = NEXT_PC; STATE = $STATE_FETCH_NEXT$;
+                        } else {
+                            STATE = $STATE_FETCH_MULTI_2$;
+                        }
+                    } else {
+                        DECODE_INSTRUCTION = THIS_INSTRUCTION;
+                        switch( THIS_INSTRUCTION[2,5] ) {
+                            case 5b11000 : {                                                                                        // BRANCH
+                                PC = BP_A.BP_ADDR;                                                                                  //  GET ADDRESSES FROM BRANCH PREDICTION
+                                STATE = $STATE_FETCH_NEXT$;                                                                         //  PASS BRANCH INSTRUCTION TO DECODE PIPELINE STAGE
+                            }
+                            case 5b11001 : { STATE = $STATE_FETCH_WAIT_JUMP$; }                                                     // JALR
+                            case 5b11011 : {                                                                                        // JAL ( NO REGISTERS USED )
+                                PC = JA;                                                                                            //  GO TO JAL ADDRESS
+                                STATE = $STATE_FETCH_NEXT$;                                                                         //  PASS TO DECODE PIPELINE STAGE TO HAVE RETURN ADDRESS SAVED
+                            }
+                            case 5b11100 : { PC = NEXT_PC; STATE = FETCH_CSR.STATE; DECODE_ACK = FETCH_CSR.DECODE_ACK; }            // CSR ONLY PASS TO DECODE STAGE IF NOT ECALL WFI
+                            default: { PC = NEXT_PC; STATE = $STATE_FETCH_NEXT$; }                                                  // PASS ALL OTHER INSTRUCTIONS TO DECODE PIPELINE STAGE
+                        }
+                    }
+
+                    DECODE_ACK = 1;
+                }
+            }
+
+            case 4: {                                                                                                           // STATE_FETCH_WAIT_JUMP
+                if( JUMP_READY ) {                                                                                              //  WAIT FOR AGU TO SINGAL JUMP ADDRESS IS SET
+                    PC = JUMP_PC; STATE = $STATE_FETCH_NEXT$;                                                                   //  GO TO JUMP ADDRESS FOR NEXT INSTRUCTION
+                }
+            }
+
+            case 5: { CSR_NEW_MEPC = PC; CSR_IRQ_ACK = 1; STATE = $STATE_FETCH_WAIT_IRQ_ACK$; }                                 // STATE_FETCH_IRQ_START
+            case 6: {                                                                                                           // STATE_FETCH_WAIT_IRQ_ACK
+                if( CSR_IRQ_ACK_ACK ) {                                                                                         //  CSR SIGNALS IRQ ACKNOWLEDGED
+                    PC = IRQ_VECTOR; CSR_IRQ_ACK = 0; STATE = $STATE_FETCH_WAIT_IRQ_STARTED$;                                   //  GO TO IRQ VECTOR FOR NEXT INSTRUCTION
+                }
+            }
+            case 7: { if( ~CSR_IRQ_PENDING ) { STATE = $STATE_FETCH_NEXT$; } }                                                  // STATE_FETCH_WAIT_IRQ_STARTED
+
+            case 8: { if( CSR_IRQ_PENDING ) { STATE = $STATE_FETCH_IRQ_START$; } }                                              // STATE_FETCH_WFI ( HALT-CATCH-FIRE IF INTERRUPTS NOT ENABLED )
+
+            case 9: { STATE = $STATE_FETCH_NEXT$; }                                                                             // STATE_FETCH_ECALL ( not yet implemented )
+
+            case 10: { if( ~MEM_BUSY_FETCH ) { STATE = $STATE_FETCH_NEXT$; } }                                                  // STATE_FETCH_FLUSH ( WAIT FOR MEMORY TO NOT BE BUSY )
+
+            case 11: { MULTI_STEP = 1; STATE = $STATE_FETCH_DECODE$; }                                                                          // STATE_FETCH_MULTI_2 ( SEND BACK TO DECODE STAGE )
+        }
+
+        BRANCH_PENDING = BP_FLUSH ? 0 : BRANCH_PENDING - BP_TAKEN + ( IS_BRANCH & DECODE_ACK );                                 // TRACK BRANCH INSTRUCTIONS IN THE PIPELINE
+        if( BP_FLUSH ) { MEM_REQ_FETCH = 0; DECODE_ACK = 0; PC = JUMP_PC; STATE = $STATE_FETCH_FLUSH$; }                        // BRANCH PREDICTION FAILED, FLUSH PIPELINE
+
+        if( reset ) {                                                                                                           // ON RESET
+            MEM_REQ_FETCH = 0;                                                                                                  //  CANCEL FETCH
+            PC = 0;                                                                                                             //  GO TO FIRST INSTRUCTION
+            BRANCH_PENDING = 0;                                                                                                 //  SET PIPELINE CLEAR OF BRANCHES
+            DECODE_ACK = 0; STATE = $STATE_FETCH_NEXT$;
+        }
+    }
+}
+
+// BRANCH PREDICTION TABLE READ
+unit branch_predict_read(
+    dualport_bram_port0         PRED_TABLE,
+    input   uint$addr_width$    PC,
+    output  uint1               TAGMATCH,
+    output  uint2               PREDICTION,
+    input   uint1               CLS
+) <reginputs> {
+    PRED_TABLE.wenable0 := 0;
+
+    PRED_TABLE.addr0 := PC[1,$BPaddrwidth$];
+    TAGMATCH := ( BP( PRED_TABLE.rdata0 ).tag == PC[$BPpartaddressstart$,$BPpartaddresswidth$] ) & BP( PRED_TABLE.rdata0 ).valid & ~CLS;
+    PREDICTION := BP( PRED_TABLE.rdata0 ).prediction;
+}
+
+// BRANCH PREDICTION ADDRESS SELECTION
+unit branch_predict_address(
+    input   uint1               TAGMATCH,
+    input   uint1               PREDICTION_DIR,
+    input   uint1               INSTRUCTION_DIR,
+    input   uint$addr_width$    BA,
+    input   uint$addr_width$    NO_BA,
+    output  uint$addr_width$    BP_ADDR
+) <reginputs> {
+    BP_ADDR := ( ( TAGMATCH & PREDICTION_DIR ) | ( ~TAGMATCH & INSTRUCTION_DIR ) ) ?                                            // CHECK BRANCH PREDICATION TABLE AND DIRECTION OF BRANCH
+                    BA :                                                                                                        //  BRANCH TAKEN IF TAGMATCH AND PREDICTED TO TAKE
+                    NO_BA;                                                                                                      //  NOT TAKEN IF TAGMATCH AND PREDICTED TO NOT TAKE
+}
+
+// DECODE ACTIONS FOR SPECIFIC CSR REGISTERS
+unit cpu_fetch_csr(
+    input   uint12              CSR,
+    output  uint1               DECODE_ACK,
+    output  uint11              STATE
+) <reginputs> {
+    always {
+        DECODE_ACK = 0;                                                                                                         // DEFAULT TO NOT PASSING THROUGH TO DECODE PIPELINE STAGE
+
+        switch( CSR ) {
+            case 12b000000000000: { STATE = $STATE_FETCH_ECALL$; }                                                              //  ECALL               SOFTWARE INTERRUPT
+            case 12b000100000101: { STATE = $STATE_FETCH_WFI$; }                                                                //  WFI                 WAIT FOR INTERRUPT / HALT-CATCH-FIRE
+            case 12b001100000010: { STATE = $STATE_FETCH_WAIT_JUMP$; DECODE_ACK = 1; }                                          //  MRET                MACHINE RETURN FROM INTERRUPT
+            default: { STATE = $STATE_FETCH_NEXT$; DECODE_ACK = 1; }                                                            //  CSRR[[W][S][C]][I]  ALL OTHER CSR REGISTERS
+        }
+    }
+}
+
+// L1 CACHE
+unit iL1cache_read(
+    simple_dualport_bram_port0 L1cache,
+    input   uint$addr_width$  ADDR,
+    input   uint1   CLS,
+    output  uint30  instruction,
+    output  uint1   compressed,
+    output  uint1   tagmatch
+) <reginputs> {
+    L1cache.addr0 := ADDR[1,$L1Icount$];                                                                                       // FOR EACH CACHE BLOCK, SET ADDRESS FROM CPU
+    tagmatch := ~CLS & ( L1cacheI( L1cache.rdata0 ).partaddress == ADDR[$L1Ipartaddressstart$,$L1Ipartaddresswidth$] ) & L1cacheI( L1cache.rdata0 ).valid;
+    instruction := L1cacheI( L1cache.rdata0 ).instruction;
+    compressed := L1cacheI( L1cache.rdata0 ).compressed;
+}
+
+unit iL1cache_write(
+    simple_dualport_bram_port1 L1cache,
+    input   uint$addr_width$  ADDR,
+    input   uint30  newinstruction,
+    input   uint1   newcompressed,
+    input   uint1   update,
+    input   uint1   invalidate,
+    output  uint1   CLS
+) <reginputs> {
+    uint$L1Icount+1$ count = 0;
+
+    L1cache.addr1 := CLS ? count : ADDR[1,$L1Icount$];
+    L1cache.wdata1 := CLS ? 0 : { newinstruction, newcompressed, 1b1, ADDR[$L1Ipartaddressstart$,$L1Ipartaddresswidth$] };
+    L1cache.wenable1 := CLS | update;
+
+    CLS := invalidate | ( count != $L1Iblocks$ );
+    count := invalidate ? 0 :  count + CLS;
+}
+
+// COMPRESSED INSTRUCTION EXPANSION
+unit compressed00(
+    input   uint14  i16,
+    output  uint28  i32                                                                                                         // { 00 xxxxxxxxxxxxxxxxxxxxxxxxxxxx 11 }
+) <reginputs> {
+    i32 := ( 1 << 2 );                                                                                                          // DEFAULT TO NOP ADDI x0, x0, 0
+
+    always {
+        switch( CBalu(i16).f3 ) {
+            case 3b000: {
+                // ADDI4SPN -> addi rd', x2, nzuimm[9:2] { 000, nzuimm[5:4|9:6|2|3] rd' 00 } -> { imm[11:0] rs1 000 rd 0010011 }
+                i32 = {
+                    CIu94(i16).ib_9_6, CIu94(i16).ib_5_4, CIu94(i16).ib_3, CIu94(i16).ib_2, 2b00,
+                    5h2,
+                    3b000,
+                    2b01, CIu94(i16).rd_alt,
+                    5b00100
+                };
+            }
+            case 3b100: {
+                uint3   f3load[4] = { 3b100, 3b100, 3b101, 3b001 };                                                             // { unsigned, accesssize } for LBU/LHU/LH
+
+                // LBU -> lbu rd', uimm[1:0]rs1'  { 100 000 rs1' uimm[0|1] rd'  00 } -> { imm[11:0]     rs1 100 rd       0000011 }
+                // LHU -> lhu rd', uimm[1]  rs1'  { 100 001 rs1' 0 uimm[1] rd'  00 } -> { imm[11:0]     rs1 101 rd       0000011 }
+                // LH  -> lh  rd', uimm[1]  rs1'  { 100 001 rs1' 1 uimm[1] rd'  00 } -> { imm[11:0]     rs1 001 rd       0000011 }
+                // SB  -> sb  uimm[1:0]rs1', rs2' { 100 010 rs1' uimm[0|1] rs2' 00 } -> { imm[11:5] rs2 rs1 000 imm[4:0] 0100011 }
+                // SH  -> sh  uimm[1]  rs1', rs2' { 100 011 rs1' 0 uimm[1] rs2' 00 } -> { imm[11:5] rs2 rs1 001 imm[4:0] 0100011 }
+                i32 = CSB(i16).function2[1,1] ?
+                    {
+                        5b00000,                                                                                                // STORE immediate[11->5]
+                        2b01, CSB(i16).rs2_alt,                                                                                 // STORE rs2
+                        2b01, CSB(i16).rs1_alt,                                                                                 // STORE rs1
+                        2b00, CSB(i16).function2[0,1],                                                                          // STORE function3 ( accesssize )
+                        3b000, CSB(i16).uimm1, CSB(i16).function2[0,1] ? 1b0 : CSB(i16).uimm0,                                  // STORE immediate[4->0]
+                        5b01000                                                                                                 // STORE opcode
+                    } :
+                    {
+                        8b00000000, CLB(i16).uimm1, CLB(i16).function2[0,1] ? 1b0 : CLB(i16).uimm0,                             // LOAD immediate[11->0]
+                        2b01, CLB(i16).rs1_alt,                                                                                 // LOAD rs1
+                        f3load[ { CLB(i16).function2[0,1], CLB(i16).uimm0 } ],                                                  // LOAD function3 ( unsigned and accesssize, byte or halfword )
+                        2b01, CLB(i16).rd_alt,                                                                                  // LOAD rd
+                        5b00000                                                                                                 // LOAD opcode
+                    };
+            }
+           default: {
+                i32 = CS(i16).f3[2,1] ?
+                    // FSD -> fsd rs2', offset[7:3](rs1') { 101 uimm[5:3] rs1' uimm[7:6] rs2' 00 } -> { imm[11:5] rs2 rs1 011 imm[4:0] 0100111 }
+                    // SW -> sw rs2', offset[6:2](rs1')   { 110 uimm[5:3] rs1' uimm[2][6] rs2' 00 } -> { imm[11:5] rs2 rs1 010 imm[4:0] 0100011 }
+                    // SD -> sd rs2', offset[7:3](rs1')   { 111 uimm[5:3] rs1' uimm[7:6] rs2' 00 } -> { imm[11:5] rs2 rs1 011 imm[4:0] 0100011 }
+                    {
+                        2b00, CS(i16).f3[0,1] ? { CSD(i16).ib_7_6 } : { 1b0, CS(i16).ib_6 }, CS(i16).ib_5,
+                        2b01, CS(i16).rs2_alt,
+                        2b01, CS(i16).rs1_alt,
+                        2b01, CS(i16).f3[0,1],
+                        CS(i16).f3[0,1] ? { CSD(i16).ib_4_3, 1b0 } : { CS(i16).ib_4_3, CS(i16).ib_2 }, 2b00,
+                        4b0100, ~CS(i16).f3[1,1]
+                    } :
+                    // FLD -> flw rd', offset[7:3](rs1') { 001 uimm[5:3] rs1' uimm[7:6] rd' 00 } -> { imm[11:0] rs1 011 rd 0000111 }
+                    // LW -> lw rd', offset[6:2](rs1')   { 010 uimm[5:3] rs1' uimm[2][6] rd' 00 } -> { imm[11:0] rs1 010 rd 0000011 }
+                    // LD -> ld rd', offset[7:3](rs1')   { 011 uimm[5:3] rs1' uimm[7:6] rd' 00 } -> { imm[11:0] rs1 011 rd 0000011 }
+                    {
+                        2b00, CL(i16).f3[0,1] ? { CLD(i16).ib_7_6, CLD(i16).ib_5_3, 1b0 } : { 1b0, CL(i16).ib_6, CL(i16).ib_5_3, CL(i16).ib_2 }, 2b00,
+                        2b01, CL(i16).rs1_alt,
+                        2b01, CL(i16).f3[0,1],
+                        2b01, CL(i16).rd_alt,
+                        4b0000, ~CL(i16).f3[1,1]
+                    };
+            }
+        }
+    }
+}
+unit compressed01(
+    input   uint14  i16,
+    output  uint30  i32,
+    output  uint1   IS_JUMP
+) <reginputs> {
+    brom uint20 c11_1_11[8] = {                                                                                                 // LOOKUP MISC-ALU FUNCTION2 = 11 IB5 = 1 LOGICAL2 = 11
+        20b00001111111111100100,    // 000 ZEXT.B
+        20b01100000010000100100,    // 001 SEXT.B
+        20b00001000000010001110,    // 010 ZEXT.H
+        20b01100000010100100100,    // 011 SEXT.H
+        20b00001000000000001110,    // 100 ZEXT.W
+        20b11111111111110000100,    // 101 NOT
+        0,
+        0
+    };
+    brom uint3 c11_0_xx[4] = {                                                                                                  // LOOKUP MISC-ALU FUNCTION2 = 11 IB5 = 0 LOGICAL2 = xx
+        3b000,                      // 00  SUB
+        3b100,                      // 01  XOR
+        3b110,                      // 10  OR
+        3b111                       // 11  AND
+    };
+    brom uint12 c11_1_xx[4] = {                                                                                                 // LOOKUP MISC-ALU FUNCTION2 = 11 IB5 = 1 LOGICAL2 = xx
+        12b010000001110,            // 00  SUBW
+        12b000000001110,            // 01  ADDW
+        12b000000101100,            // 10  MUL
+        0
+    };
+
+    c11_0_xx.addr := CBalu(i16).logical2;
+    c11_1_11.addr := CBalu(i16).rs2_alt;
+    c11_1_xx.addr := CBalu(i16).logical2;
+
+    i32 := ( 1 << 2 ); IS_JUMP := 0;                                                                                            // DEFAULT TO NOP ADDI x0, x0, 0 AND NOT A JUMP
+
+    always {
+        switch( CBalu(i16).f3 ) {
+            case 3b010: {
+                // 3b010 -> LI -> addi rd, x0, imm[5:0]     { 010   imm[5]     rd!=0    mm[4:0] 01 } -> { imm[11:0] rs1 000 rd 0010011 }
+                i32 = {
+                    {7{CI50(i16).ib_5}}, CI50(i16).ib_4_0,
+                    5h0,
+                    3b000,
+                    CI50(i16).rd,
+                    5b00100
+                };
+            }
+            case 3b011: {
+                if( CI(i16).rd == 2 ) {
+                    // 3b011 -> ADDI16SP -> addi x2, x2, nzimm[9:4] { 011 nzimm[9] 00010 nzimm[4|6|8:7|5] 01 } -> { imm[11:0] rs1 000 rd 0010011 }
+                    i32 = {
+                        {3{CI94(i16).ib_9}}, CI94(i16).ib_8_7, CI94(i16).ib_6, CI94(i16).ib_5, CI94(i16).ib_4, 4b0000,
+                        5h2,
+                        3b000,
+                        5h2,
+                        5b00100
+                    };
+                } else {
+                    // 3b011 -> LUI -> lui rd, nzuimm[17:12] { 011 nzimm[17] rd!={0,2} nzimm[16:12] 01 } -> { imm[31:12] rd 0110111 }
+                    i32 = {
+                        {15{CIlui(i16).ib_17}}, CIlui(i16).ib_16_12,
+                        CIlui(i16).rd,
+                        5b01101
+                    };
+                }
+            }
+            case 3b100: {
+                // MISC-ALU
+                switch( CBalu(i16).function2 ) {
+                    // 2b00 -> SRLI -> srli rd', rd', shamt[5:0] { 100 nzuimm[5] 00 rs1'/rd' nzuimm[4:0] 01 } -> { 000000 shamt rs1 101 rd 0010011 }
+                    // 2b01 -> SRAI -> srai rd', rd', shamt[5:0] { 100 nzuimm[5] 01 rs1'/rd' nzuimm[4:0] 01 } -> { 010000 shamt rs1 101 rd 0010011 }
+                    // 2b10 -> ANDI -> andi rd', rd',   imm[5:0] { 100    imm[5] 10 rs1'/rd'    imm[4:0] 01 } -> { imm[11:0]    rs1 111 rd 0010011 }
+                    case 2b00: { i32 = { 6b000000, CBalu50(i16).ib_5, CBalu50(i16).ib_4_0, 2b01, CBalu50(i16).rd_alt, 3b101, 2b01, CBalu50(i16).rd_alt, 5b00100 }; }
+                    case 2b01: { i32 = { 6b010000, CBalu50(i16).ib_5, CBalu50(i16).ib_4_0, 2b01, CBalu50(i16).rd_alt, 3b101, 2b01, CBalu50(i16).rd_alt, 5b00100 }; }
+                    case 2b10: { i32 = { {6{CBalu50(i16).ib_5}}, CBalu50(i16).ib_5, CBalu50(i16).ib_4_0, 2b01, CBalu50(i16).rd_alt, 3b111, 2b01, CBalu50(i16).rd_alt, 5b00100 }; }
+                    case 2b11: {
+                        switch( CBalu(i16).ib_5 ) {
+                            case 1b0: {
+                                // 2b00 -> SUB -> sub rd', rd', rs2'      { 100 0 11 rs1'/rd' 00 rs2' 01 } -> { 0100000 rs2 rs1 000 rd 0110011 }
+                                // 2b01 -> XOR -> xor rd', rd', rs2'      { 100 0 11 rs1'/rd' 01 rs2' 01 } -> { 0000000 rs2 rs1 100 rd 0110011 }
+                                // 2b10 -> OR  -> or  rd', rd', rd2'      { 100 0 11 rs1'/rd' 10 rs2' 01 } -> { 0000000 rs2 rs1 110 rd 0110011 }
+                                // 2b11 -> AND -> and rd', rd', rs2'      { 100 0 11 rs1'/rd' 11 rs2' 01 } -> { 0000000 rs2 rs1 111 rd 0110011 }
+                                i32 = { 1b0, ~|CBalu(i16).logical2, 5b000, 2b01, CBalu(i16).rs2_alt, 2b01, CBalu(i16).rd_alt, c11_0_xx.rdata[0,3], 2b01, CBalu(i16).rd_alt, 5b01100 };
+                            }
+                            case 1b1: {
+                                // 2b11 -> SUBW -> subw rd', rd', rs2'    { 100 1 11 rs1'/rd' 00 rs2' 01 } -> { 0100000 rs2   rs1 000 rd 0111011 }
+                                // 2b11 -> ADDW -> addw rd', rd', rs2'    { 100 1 11 rs1'/rd' 01 rs2' 01 } -> { 0000000 rs2   rs1 000 rd 0111011 }
+                                // 2b11 -> MUL -> mul rd', rd', rs2'      { 100 1 11 rs1'/rd' 10 rs2' 01 } -> { 0000001 rs2   rs1 000 rd 0110011 }
+                                // 2b11 -> ZEXT.B -> andi rd',rs1',0xff   { 100 1 11 rd1'/rd' 11 000  01 } -> { 0000111 11111 rs1 111 rd 0010011 }
+                                // 2b11 -> SEXT.B -> sext.b rd',rs1'      { 100 1 11 rd1'/rd' 11 001  01 } -> { 0110000 00100 rs1 001 rd 0010011 }
+                                // 2b11 -> ZEXT.H -> zext.h rd',rs1'      { 100 1 11 rd1'/rd' 11 010  01 } -> { 0000100 00000 rs1 100 rd 0111011 }
+                                // 2b11 -> SEXT.H -> sext.h rd',rs1'      { 100 1 11 rd1'/rd' 11 011  01 } -> { 0110000 00101 rs1 001 rd 0010011 }
+                                // 2b11 -> ZEXT.W -> add.uw rd',rs1',zero { 100 1 11 rd1'/rd' 11 100  01 } -> { 0000100 00000 rs1 000 rd 0111011 }
+                                // 2b11 -> NOT ->    xor rd',rs1',-1      { 100 1 11 rd1'/rd' 11 101  01 } -> { 1111111 11111 rs1 100 rd 0010011 }
+                                switch( CBalu(i16).logical2 ) {
+                                    default:   { i32 = { c11_1_xx.rdata[ 5,7], 2b01, CBalu(i16).rs2_alt, 2b01, CBalu(i16).rd_alt, 3b000,               2b01, CBalu(i16).rd_alt, c11_1_xx.rdata[0,5] }; }
+                                    case 2b11: { i32 = { c11_1_11.rdata[13,7], c11_1_11.rdata[8,5],      2b01, CBalu(i16).rd_alt, c11_1_11.rdata[5,3], 2b01, CBalu(i16).rd_alt, c11_1_11.rdata[0,5] }; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            case 3b101: {
+                // 3b101 -> J -> jal, x0, offset[11:1] { 101, imm[11|4|9:8|10|6|7|3:1|5] 01 } -> { imm[20|10:1|11|19:12] rd 1101111 }
+                i32 = {
+                    CJ(i16).ib_11, CJ(i16).ib_10, CJ(i16).ib_9_8, CJ(i16).ib_7, CJ(i16).ib_6, CJ(i16).ib_5, CJ(i16).ib_4, CJ(i16).ib_3_1, {9{CJ(i16).ib_11}},
+                    5h0,
+                    5b11011
+                };
+                IS_JUMP = 1;
+            }
+            default: {
+                // 3b000 -> ADDI -> addi rd, rd, nzimm[5:0] { 000 nzimm[5] rs1/rd!=0 nzimm[4:0] 01 } -> { imm[11:0] rs1 000 rd 0010011 }
+                //          NOP if rd == 0 and nzimm == 5b000000
+                // 3b001 -> ADDIW -> addiw rd,rd,imm[5:0]   { 001   imm[5]     rd      imm[4:0] 01 } -> { imm[11:0] rd  000 rd 0011011 }
+                // 3b110 -> BEQZ -> beq rs1', x0, offset[8:1] { 110, imm[8|4:3] rs1' imm[7:6|2:1|5] 01 } -> { imm[12|10:5] rs2 rs1 000 imm[4:1|11] 1100011 }
+                // 3b111 -> BNEZ -> bne rs1', x0, offset[8:1] { 111, imm[8|4:3] rs1' imm[7:6|2:1|5] 01 } -> { imm[12|10:5] rs2 rs1 001 imm[4:1|11] 1100011 }
+                i32 = CBalu(i16).f3[2,1] ?
+                        {
+                            {4{CB(i16).offset_8}}, CB(i16).offset_7_6, CB(i16).offset_5,
+                            5h0,
+                            2b01, CB(i16).rs1_alt,
+                            2b00, CB(i16).f3[0,1],
+                            CB(i16).offset_4_3, CB(i16).offset_2_1, CB(i16).offset_8,
+                            5b11000
+                        } : {
+                            {7{CI50(i16).ib_5}}, CI50(i16).ib_4_0,
+                            CI50(i16).rd,
+                            3b000,
+                            CI50(i16).rd,
+                            CBalu(i16).f3[0,1] ? 5b00110 : 5b00100
+                        };
+                IS_JUMP = CBalu(i16).f3[2,1];
+            }
+        }
+    }
+}
+unit compressed10(
+    input   uint14  i16,
+    output  uint27  i32,                                                                                                        // { 000 xxxxxxxxxxxxxxxxxxxxxxxxxxx 11 }
+    output  uint1   IS_JUMP
+) <reginputs> {
+    i32 := ( 1 << 2 ); IS_JUMP := 0;                                                                                            // DEFAULT TO NOP ADDI x0, x0, 0 AND NOT A JUMP
+
+    always {
+        switch( CBalu(i16).f3 ) {
+            case 3b000: {
+                // SLLI -> slli rd, rd, shamt[5:0] { 000, nzuimm[5], rs1/rd!=0 nzuimm[4:0] 10 } -> { 000000 shamt rs1 001 rd 0010011 }
+                i32 = {
+                    3b000,
+                    CI50(i16).ib_5, CI50(i16).ib_4_0,
+                    CI50(i16).rd,
+                    3b001,
+                    CI50(i16).rd,
+                    5b00100
+                };
+            }
+            case 3b100: {
+                // J[AL]R / MV / ADD
+                if( ~|CR(i16).rs2 ) {
+                    // JR   -> jalr x0, rs1, 0 { 100 0 rs1 00000 10 } -> { imm[11:0] rs1 000 rd 1100111 }
+                    // JALR -> jalr x1, rs1, 0 { 100 1 rs1 00000 10 } -> { imm[11:0] rs1 000 rd 1100111 }
+                    i32 = {
+                        9b000000000,
+                        CR(i16).rs1,
+                        3b000,
+                        4b0000, CR(i16).function4[0,1],
+                        5b11001
+                    };
+                    IS_JUMP = 1;
+                } else {
+                    // MV  -> add rd, x0, rs2 { 100 0 rd!=0     rs2!=0 10 } -> { 0000000 rs2 rs1 000 rd 0110011 }
+                    // ADD -> add rd, rd, rs2 { 100 1 rs1/rd!=0 rs2!=0 10 } -> { 0000000 rs2 rs1 000 rd 0110011 }
+                    i32 = {
+                        4b0000,
+                        CR(i16).rs2,
+                        CR(i16).function4[0,1] ? CR(i16).rs1 : 5h0,
+                        3b000,
+                        CR(i16).rs1,
+                        5b01100
+                    };
+                }
+            }
+            default: {
+                i32 = CSS(i16).f3[2,1] ?
+                    // FSDSP -> fsd rs2, offset[8:3](x2) { 101 uimm[5:3][8:6]    rs2 10 } -> { imm[11:5] rs2 rs1 011 imm[4:0] 0100111 }
+                    // SWSP -> sw rs2, offset[7:2](x2)   { 110 uimm[5][4:2][7:6] rs2 10 } -> { imm[11:5] rs2 rs1 010 imm[4:0] 0100011 }
+                    // SDSP -> sd rs2, offset[8:3](x2)   { 111 uimm[5:3][8:6]    rs2 10 } -> { imm[11:5] rs2 rs1 011 imm[4:0] 0100111 }
+                    {
+                        CSS(i16).f3[0,1] ? { CSSD(i16).ib_8_6, CSSD(i16).ib_5 } : { 1b0, CSS(i16).ib_7_6, CSS(i16).ib_5 },
+                        CSS(i16).rs2,
+                        5h2,
+                        2b01, CSS(i16).f3[0,1],
+                        CSS(i16).f3[0,1] ? { CSSD(i16).ib_4_3, 1b0 } : { CSS(i16).ib_4_2 }, 2b00,
+                        4b0100, ~CSS(i16).f3[1,1]
+                    } :
+                    // FLDSP -> fld rd, offset[8:3](x2) { 001 uimm[5] rd uimm[4:3|8:6] 10 } -> { imm[11:0] rs1 011 rd 0000111 }
+                    // LWSP -> lw rd, offset[7:2](x2)   { 010 uimm[5] rd uimm[4:2|7:6] 10 } -> { imm[11:0] rs1 010 rd 0000011 }
+                    // LDSP -> ld rd, offset[8:3](x2)   { 011 uimm[5] rd uimm[4:3|8:6] 10 } -> { imm[11:0] rs1 011 rd 0000011 }
+                    {
+                        CLS(i16).f3[0,1] ? { CLSD(i16).ib_8_6, CLSD(i16).ib_5, CLSD(i16).ib_4_3, 1b0 } : { 1b0, CLS(i16).ib_7_6, CLS(i16).ib_5, CLS(i16).ib_4_2 }, 2b00,
+                        5h2,
+                        2b01, CSS(i16).f3[0,1] ,
+                        CI(i16).rd,
+                        4b0000, ~CSS(i16).f3[1,1]
+                    };
+            }
+        }
+    }
+}
+
+// CONVERT XTHEAD INSTRUCTIONS TO RISC-V EXTENSION INSTRUCIONS WHERE APPLICABLE
+//
+//  F3 == 001
+//      BITS [27,5]
+//      00000   TH.ADDSL -> SHxADD
+//      00010   TH.SRRI -> RORI TH.SRRIW -> RORIW
+//      00100   TH.MULA  TH.MULAW TH.MULS TH.MULSW
+//      00101   TH.MULAH TH.MULSH
+//      01000   TH.MVEQZ TH.MVNEZ
+//      10000   TH.FF0 TH.FF1 TH.REV -> REV8 TH.TSTNBZ
+//      10001   TH.TST -> BEXTI
+//      10010   TH.REVW
+//  F3 == 010
+//      TH.EXT
+//  F3 == 011
+//      TH.EXTU
+
+unit custom_convert(
+    input   uint32  INSTRUCTION,
+    output  uint32  CNV_INSTRUCTION
+) <reginputs> {
+    CNV_INSTRUCTION := INSTRUCTION;                                                                                             // DEFAULT TO INSTTRUCTION, NO CHANGE
+
+    always {
+        if( Rtype( INSTRUCTION ).f3 == 3b001 ) {
+            switch( INSTRUCTION[27,5] ) {
+                default: {}
+                case 5b00000: {                                                                                                 // TH.ADDSL -> SHxADD
+                    CNV_INSTRUCTION = { 7b0010000, INSTRUCTION[20,5], INSTRUCTION[15,5], INSTRUCTION[25,2], 1b0, INSTRUCTION[7,5], 7b0111011 };
+                }
+                case 5b00010: {                                                                                                 // TH.SRRI -> RORI TH.SRRIW -> RORIW
+                    CNV_INSTRUCTION = INSTRUCTION[26,1] ? { 7b0110000, INSTRUCTION[20,5], INSTRUCTION[15,5], 3b101, INSTRUCTION[7,5], 7b0011011 } :
+                                                          {  6b011000, INSTRUCTION[20,6], INSTRUCTION[15,5], 3b101, INSTRUCTION[7,5], 7b0010011 };
+                }
+                case 5b10000: {                                                                                                 // TH.REV -> REV8 TH.TSTNBZ
+                    if( ~|INSTRUCTION[25,2] ) {
+                        CNV_INSTRUCTION = { 12b011010111000, INSTRUCTION[15,5], 3b101, INSTRUCTION[7,5], 7b0010011 };
+                    }
+                }
+                case 5b10001: {                                                                                                 // TH.TST -> BEXTI
+                    CNV_INSTRUCTION = { 7b0100100, INSTRUCTION[20,5], INSTRUCTION[15,5], 3b101, INSTRUCTION[7,5], 7b0010011 };
+                }
+            }
+        }
+    }
+}
+
+unit custom_multi(
+    input   uint32  INSTRUCTION,
+    output  uint5   FLAGS
+) <reginputs> {
+    // { POST-INC, PRE-INC, SAVE, LOAD, MULTI_INSTRUCTION }
+    FLAGS := &INSTRUCTION[29,3] ? { 2b00, INSTRUCTION[12,1], ~INSTRUCTION[12,1], 1b1 } :                                        // MULTI-REGISTER LOAD/SAVE
+              INSTRUCTION[27,1] ? { INSTRUCTION[28,1], ~INSTRUCTION[28,1], INSTRUCTION[12,1], ~INSTRUCTION[12,1], 1b1 } :       // PRE-POST INCREMENT LOAD/SAVE
+                                  5b00000;                                                                                      // INDEXED LOAD/SAVE
+}

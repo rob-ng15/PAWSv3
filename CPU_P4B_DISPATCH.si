@@ -1,0 +1,270 @@
+// DISPATCH_FLAGS = { CUSTOM, STORE, LOAD, JUMP, FPU_FAST, FPU_CONVERT, FPU, FENCE, CSR, ATOMIC, ALU_SIGNX, ALU_FAST, ALU, WR_F, WR }
+$$ DISP_IS_WR =          "DISPATCH_FLAGS[ 0,1]"
+$$ DISP_IS_WR_F =        "DISPATCH_FLAGS[ 1,1]"
+$$ DISP_IS_ALU =         "DISPATCH_FLAGS[ 2,1]"
+$$ DISP_IS_ALU_FAST =    "DISPATCH_FLAGS[ 3,1]"
+$$ DISP_IS_ALU_SIGNX =   "DISPATCH_FLAGS[ 4,1]"
+$$ DISP_IS_ATOMIC =      "DISPATCH_FLAGS[ 5,1]"
+$$ DISP_IS_CSR =         "DISPATCH_FLAGS[ 6,1]"
+$$ DISP_IS_FENCE =       "DISPATCH_FLAGS[ 7,1]"
+$$ DISP_IS_FPU =         "DISPATCH_FLAGS[ 8,1]"
+$$ DISP_IS_FPU_CONVERT = "DISPATCH_FLAGS[ 9,1]"
+$$ DISP_IS_FPU_FAST =    "DISPATCH_FLAGS[10,1]"
+$$ DISP_IS_JUMP =        "DISPATCH_FLAGS[11,1]"
+$$ DISP_IS_LOAD =        "DISPATCH_FLAGS[12,1]"
+$$ DISP_IS_STORE =       "DISPATCH_FLAGS[13,1]"
+$$ DISP_IS_BRANCH =      "DISPATCH_FLAGS[14,1]"
+$$ DISP_IS_CUSTOM =      "DISPATCH_FLAGS[15,1]"
+
+unit cpu_dispatch(
+    input   uint1               clock_decode,
+
+    $$for i=1,2 do
+    input   uint64              DISPATCH_I$i$,                                                                                  // INTEGER REGISTERS    PIPELINE INPUT
+    output  uint64              EXECUTE_ALUDIVIDE_I$i$,
+    output  uint1               EXECUTE_ALUDIVIDE_I$i$_SIGN,
+    $$end
+    input   uint64              DISPATCH_I3,                                                                                   // INTEGER REGISTERS    PIPELINE INPUT
+    $$for i=1,3 do
+    simple_dualport_bram_port0 F$i$,                                                                                            // FLOAT REGISTERS READ PORT
+    output  uint64              EXECUTE_CSRFPU_F$i$,
+    $$end
+
+    output  uint1               DISPATCH_READY,
+    input   uint1               DISPATCH_ACK,
+    input   uint32              DISPATCH_INSTRUCTION,
+    input   uint16              DISPATCH_FLAGS,
+    input   uint64              DISPATCH_IMM_LA_SA,
+
+    input   uint1               EXECUTE_LSA_READY,
+    output  uint1               EXECUTE_LSA_ACK,
+    output  uint64              EXECUTE_LSA_I2,
+    output  uint64              EXECUTE_LSA_F2,
+    output  uint32              EXECUTE_LSA_INSTRUCTION,
+    output  uint6               EXECUTE_LSA_FLAGS,
+    output  uint$addr_width$    EXECUTE_LSA_ADDRESS,
+
+    input   uint1               EXECUTE_ALUDIVIDE_READY,
+    output  uint1               EXECUTE_ALUDIVIDE_ACK,
+    output  uint5               EXECUTE_ALUDIVIDE_DESTREG,
+    output  uint2               EXECUTE_ALUDIVIDE_F3,
+    output  uint1               EXECUTE_DIVIDE_IS_32,
+
+    input   uint1               EXECUTE_CSRFPU_READY,
+    output  uint1               EXECUTE_CSRFPU_ACK,
+    output  uint64              EXECUTE_CSRFPU_I1,
+    output  uint32              EXECUTE_CSRFPU_I1_ABS32,
+    output  uint64              EXECUTE_CSRFPU_I1_ABS64,
+    output  uint32              EXECUTE_CSRFPU_INSTRUCTION,
+    output  uint6               EXECUTE_CSRFPU_FLAGS,
+
+    output  uint64              DISPATCH_RD                                                                                     // REGISTER INSTRUCTION IN DISPATCH IS WRITING TO { FLOAT, RD }
+) <reginputs> {
+    uint4               STATE = 1;
+
+    abs_3264 ABS_I1 <@clock_decode> ( I <: DISPATCH_I1 );                                                                       // GET 32 AND 64 BIT ABSOLUTE VALUES OF I1
+    abs_3264 ABS_I2 <@clock_decode> ( I <: DISPATCH_I2 );                                                              // GET 32 AND 64 BIT ABSOLUTE VALUES OF I2
+    aludivide_latch ALUDIVIDE(
+        LATCH <:EXECUTE_ALUDIVIDE_READY,
+
+        $$for i=1,2 do
+        DISPATCH_I$i$ <: DISPATCH_I$i$,                                                                                  // INTEGER REGISTERS    PIPELINE INPUT
+        DISPATCH_I$i$_ABS32 <: ABS_I$i$.ABS_32,
+        DISPATCH_I$i$_ABS64 <: ABS_I$i$.ABS_64,
+        $$end
+        DISPATCH_INSTRUCTION <: DISPATCH_INSTRUCTION,
+
+        EXECUTE_ALUDIVIDE_DESTREG :> EXECUTE_ALUDIVIDE_DESTREG,
+        EXECUTE_ALUDIVIDE_F3 :> EXECUTE_ALUDIVIDE_F3,
+        EXECUTE_DIVIDE_IS_32 :> EXECUTE_DIVIDE_IS_32,
+        $$for i=1,2 do
+        EXECUTE_ALUDIVIDE_I$i$ :> EXECUTE_ALUDIVIDE_I$i$,
+        EXECUTE_ALUDIVIDE_I$i$_SIGN :> EXECUTE_ALUDIVIDE_I$i$_SIGN,
+        $$end
+    );
+
+    csrfpu_latch CSRFPU(
+        LATCH <:EXECUTE_CSRFPU_READY,
+
+        DISPATCH_INSTRUCTION <: DISPATCH_INSTRUCTION,
+        DISPATCH_FLAGS <: DISPATCH_FLAGS,
+        $$for i=1,3 do
+        DISPATCH_F$i$ <: F$i$.rdata0,                                                                                  // FLOAT REGISTERS      PIPELINE INPUT
+        $$end
+        DISPATCH_I1 <: DISPATCH_I1,
+        DISPATCH_I1_ABS_32 <: ABS_I1.ABS_32,
+        DISPATCH_I1_ABS_64 <: ABS_I1.ABS_64,
+
+        $$for i=1,3 do
+        EXECUTE_CSRFPU_F$i$ :> EXECUTE_CSRFPU_F$i$,
+        $$end
+        EXECUTE_CSRFPU_I1 :> EXECUTE_CSRFPU_I1,
+        EXECUTE_CSRFPU_I1_ABS32 :> EXECUTE_CSRFPU_I1_ABS32,
+        EXECUTE_CSRFPU_I1_ABS64 :> EXECUTE_CSRFPU_I1_ABS64,
+
+        EXECUTE_CSRFPU_INSTRUCTION :> EXECUTE_CSRFPU_INSTRUCTION,
+        EXECUTE_CSRFPU_FLAGS :> EXECUTE_CSRFPU_FLAGS,
+    );
+
+    lsa_latch LSA(
+        LATCH <:EXECUTE_LSA_READY,
+
+        DISPATCH_INSTRUCTION <: DISPATCH_INSTRUCTION,
+        DISPATCH_FLAGS <: DISPATCH_FLAGS,
+        DISPATCH_IMM_LA_SA <: DISPATCH_IMM_LA_SA,
+        DISPATCH_F2 <: F2.rdata0,
+
+        EXECUTE_LSA_INSTRUCTION :> EXECUTE_LSA_INSTRUCTION,
+        EXECUTE_LSA_FLAGS :> EXECUTE_LSA_FLAGS,
+        EXECUTE_LSA_ADDRESS :> EXECUTE_LSA_ADDRESS,
+        EXECUTE_LSA_I2 :> EXECUTE_LSA_I2,
+        EXECUTE_LSA_F2 :> EXECUTE_LSA_F2
+    );
+    LSA.DISPATCH_I2 := ( $DISP_IS_CUSTOM$ & $DISP_IS_STORE$ ) ? DISPATCH_I3 : DISPATCH_I2;
+
+    F1.addr0 := R4type( DISPATCH_INSTRUCTION ).sr1;
+    F2.addr0 := ( $DISP_IS_CUSTOM$ & $DISP_IS_STORE$ ) ? R4type( DISPATCH_INSTRUCTION ).rd :                                    // FOR XTHEADFMEMIDX
+                                                         R4type( DISPATCH_INSTRUCTION ).sr2;
+    F3.addr0 := R4type( DISPATCH_INSTRUCTION ).sr3;
+
+    EXECUTE_ALUDIVIDE_ACK := 0; EXECUTE_CSRFPU_ACK := 0; EXECUTE_LSA_ACK := 0;
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                if( DISPATCH_ACK ) {                                                                                            // WAIT FOR AGU TO ACKNOWLEDGE INSTRUCTION IS READY
+                    DISPATCH_READY = 0;                                                                                         //  HALT AGU SENDING MORE INSTRUCTIONS
+                    DISPATCH_RD[ { $DISP_IS_WR_F$, $DISP_IS_WR$ ? Rtype( DISPATCH_INSTRUCTION ).rd : 5b00000 }, 1] = 1;                //  FLAG RD FOR CONTENTION
+
+                    if( $DISP_IS_CSR$ | $DISP_IS_FPU$ ) {
+                        if( EXECUTE_CSRFPU_READY ) {
+                            EXECUTE_CSRFPU_ACK = 1; DISPATCH_READY = 1; } else { STATE = 4; }
+                    } else {
+                        if( $DISP_IS_ALU$ ) {
+                            if( EXECUTE_ALUDIVIDE_READY ) { EXECUTE_ALUDIVIDE_ACK = 1; DISPATCH_READY = 1; } else { STATE = 2; }
+                        } else {
+                            if( EXECUTE_LSA_READY ) { EXECUTE_LSA_ACK = 1; DISPATCH_READY = 1; } else { STATE = 8; }
+                        }
+                    }
+                } else {
+                    DISPATCH_RD = 0;
+                }
+            }
+            case 1: { if( EXECUTE_ALUDIVIDE_READY ) { EXECUTE_ALUDIVIDE_ACK = 1; DISPATCH_READY = 1; STATE = 1; } }
+            case 2: { if( EXECUTE_CSRFPU_READY ) { EXECUTE_CSRFPU_ACK = 1; DISPATCH_READY = 1; STATE = 1; } }
+            case 3: { if( EXECUTE_LSA_READY ) { EXECUTE_LSA_ACK = 1; DISPATCH_READY = 1; STATE = 1; } }
+        }
+
+        if( reset ) { DISPATCH_RD = 0; DISPATCH_READY = 1; STATE = 1; }
+    }
+}
+
+// ABSOLUTE VALUES FOR 32 AND 64 BIT REGISTER CONTENTS
+unit abs_3264(
+    input   uint64  I,
+    output  uint32  ABS_32,
+    output  uint64  ABS_64
+) <reginputs> {
+    ABS_32 := I[31,1] ? -I[0,32] : I[0,32];
+    ABS_64 := I[63,1] ? -I       : I;
+}
+
+unit aludivide_latch(
+    input   uint1               LATCH,
+
+    $$for i=1,2 do
+    input   uint64              DISPATCH_I$i$,                                                                                  // INTEGER REGISTERS    PIPELINE INPUT
+    input   uint32              DISPATCH_I$i$_ABS32,
+    input   uint64              DISPATCH_I$i$_ABS64,
+    $$end
+    input   uint32              DISPATCH_INSTRUCTION,
+
+    output  uint5               EXECUTE_ALUDIVIDE_DESTREG,
+    output  uint2               EXECUTE_ALUDIVIDE_F3,
+    output  uint1               EXECUTE_DIVIDE_IS_32,
+    $$for i=1,2 do
+    output  uint64              EXECUTE_ALUDIVIDE_I$i$,
+    output  uint1               EXECUTE_ALUDIVIDE_I$i$_SIGN,
+    $$end
+) <reginputs> {
+    always {
+        if( LATCH ) {
+            EXECUTE_ALUDIVIDE_DESTREG = Rtype( DISPATCH_INSTRUCTION ).rd;
+            EXECUTE_ALUDIVIDE_F3 = Rtype( DISPATCH_INSTRUCTION ).f3[0,2];
+            EXECUTE_DIVIDE_IS_32 = DISPATCH_INSTRUCTION[3,1];
+            $$for i=1,2 do
+            EXECUTE_ALUDIVIDE_I$i$ = DISPATCH_INSTRUCTION[3,1] ? ( Rtype( DISPATCH_INSTRUCTION ).f3[0,1] ? DISPATCH_I$i$[0,32] :  DISPATCH_I$i$_ABS32 ) :
+                                                                 ( Rtype( DISPATCH_INSTRUCTION ).f3[0,1] ? DISPATCH_I$i$       :  DISPATCH_I$i$_ABS64 );
+            EXECUTE_ALUDIVIDE_I$i$_SIGN = Rtype( DISPATCH_INSTRUCTION ).f3[0,1] ? 0 : DISPATCH_I$i$[{~DISPATCH_INSTRUCTION[3,1], 5b11111 },1];
+            $$end
+        }
+    }
+}
+
+unit csrfpu_latch(
+    input   uint1               LATCH,
+
+    $$for i=1,3 do
+    input   uint64              DISPATCH_F$i$,                                                                                  // FLOAT REGISTERS      PIPELINE INPUT
+    $$end
+    input   uint32              DISPATCH_INSTRUCTION,
+    input   uint14              DISPATCH_FLAGS,
+    input   uint64              DISPATCH_I1,
+    input   uint32              DISPATCH_I1_ABS_32,
+    input   uint64              DISPATCH_I1_ABS_64,
+
+    $$for i=1,3 do
+    output  uint64              EXECUTE_CSRFPU_F$i$,
+    $$end
+    output  uint64              EXECUTE_CSRFPU_I1,
+    output  uint32              EXECUTE_CSRFPU_I1_ABS32,
+    output  uint64              EXECUTE_CSRFPU_I1_ABS64,
+
+    output  uint32              EXECUTE_CSRFPU_INSTRUCTION,
+    output  uint6               EXECUTE_CSRFPU_FLAGS
+) <reginputs> {
+    always {
+        if( LATCH ) {
+            EXECUTE_CSRFPU_INSTRUCTION = DISPATCH_INSTRUCTION;
+            EXECUTE_CSRFPU_I1 = DISPATCH_I1;
+            EXECUTE_CSRFPU_I1_ABS32 = DISPATCH_I1_ABS_32;
+            EXECUTE_CSRFPU_I1_ABS64 = DISPATCH_I1_ABS_64;
+            $$for i=1,3 do
+            EXECUTE_CSRFPU_F$i$ = DISPATCH_F$i$;
+            $$end
+            EXECUTE_CSRFPU_FLAGS = {
+                $DISP_IS_FPU_FAST$,
+                $DISP_IS_FPU_CONVERT$,
+                $DISP_IS_FPU$,
+                $DISP_IS_CSR$, $DISP_IS_WR_F$,
+                $DISP_IS_WR$
+            };
+        }
+    }
+}
+
+unit lsa_latch(
+    input   uint1               LATCH,
+
+    input   uint32              DISPATCH_INSTRUCTION,
+    input   uint16              DISPATCH_FLAGS,
+    input   uint64              DISPATCH_IMM_LA_SA,
+    input   uint64              DISPATCH_I2,                                                                                  // INTEGER REGISTERS    PIPELINE INPUT
+    input   uint64              DISPATCH_F2,                                                                                  // INTEGER REGISTERS    PIPELINE INPUT
+
+    output  uint32              EXECUTE_LSA_INSTRUCTION,
+    output  uint6               EXECUTE_LSA_FLAGS,
+    output  uint$addr_width$    EXECUTE_LSA_ADDRESS,
+    output  uint64              EXECUTE_LSA_I2,
+    output  uint64              EXECUTE_LSA_F2,
+) <reginputs> {
+    always {
+        if( LATCH ) {
+            EXECUTE_LSA_INSTRUCTION = DISPATCH_INSTRUCTION;
+            EXECUTE_LSA_FLAGS = { $DISP_IS_CUSTOM$, $DISP_IS_STORE$, $DISP_IS_LOAD$, $DISP_IS_ATOMIC$, $DISP_IS_WR_F$, $DISP_IS_WR$ };
+            EXECUTE_LSA_ADDRESS = DISPATCH_IMM_LA_SA;
+            EXECUTE_LSA_I2 = DISPATCH_I2;
+            EXECUTE_LSA_F2 = DISPATCH_F2;
+        }
+    }
+}

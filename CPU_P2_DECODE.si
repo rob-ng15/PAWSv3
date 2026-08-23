@@ -1,0 +1,462 @@
+unit cpu_decode(
+    input   uint1               clock_decode,
+
+    input   uint1               BP_FLUSH,
+
+    output  uint1               DECODE_READY,                                                                                   // COMMUNICATION WITH FETCH STAGE
+    input   uint1               DECODE_ACK,
+
+    input   uint$addr_width$    DECODE_PC,
+    input   uint$addr_width$    DECODE_PC_INC,
+    input   uint$addr_width$    DECODE_BA,
+    input   uint32              DECODE_INSTRUCTION,
+    input   uint3               DECODE_PRED_TABLE,
+
+    input   uint1               REGISTERS_READY,                                                                                // COMMUNICATION WITH REGISTERS STAGE
+    output  uint1               REGISTERS_ACK,
+
+    output  uint$addr_width$    REGISTERS_PC,
+    output  uint$addr_width$    REGISTERS_PC_INC,
+    output  uint$addr_width$    REGISTERS_BA,
+    output  uint32              REGISTERS_INSTRUCTION,
+    output  uint16              REGISTERS_FLAGS,
+    output  uint3               REGISTERS_SR_F,
+    output  uint3               REGISTERS_SR,
+    output  uint3               REGISTERS_PRED_TABLE
+) <reginputs> {
+    uint3               STATE = 1;
+                        $$ STATE_DECODE_WAIT                = 1
+                        $$ STATE_DECODE_REGISTERS           = 2
+                        $$ STATE_DECODE_BP_FLUSH_COMPLETE   = 4
+
+    registers_latch REGISTERS(
+        clock_decode <: clock_decode,
+        LATCH <: REGISTERS_READY,
+
+        DECODE_PC <: DECODE_PC,
+        DECODE_PC_INC <: DECODE_PC_INC,
+        DECODE_BA <: DECODE_BA,
+        DECODE_INSTRUCTION <: DECODE_INSTRUCTION,
+        DECODE_PRED_TABLE <: DECODE_PRED_TABLE,
+
+        REGISTERS_PC :> REGISTERS_PC,
+        REGISTERS_PC_INC :> REGISTERS_PC_INC,
+        REGISTERS_BA :> REGISTERS_BA,
+        REGISTERS_INSTRUCTION :> REGISTERS_INSTRUCTION,
+        REGISTERS_FLAGS :> REGISTERS_FLAGS,
+        REGISTERS_SR_F :> REGISTERS_SR_F,
+        REGISTERS_SR :> REGISTERS_SR,
+        REGISTERS_PRED_TABLE :> REGISTERS_PRED_TABLE
+    );
+
+    REGISTERS_ACK := STATE[1,1] & REGISTERS_READY;
+
+    always {
+        onehot( STATE ) {
+            case 0: { if( DECODE_ACK ) { DECODE_READY = 0; STATE = $STATE_DECODE_REGISTERS$; } }                                // STATE_DECODE_WAIT
+            case 1: { if( REGISTERS_READY ) { DECODE_READY = 1; STATE = $STATE_DECODE_WAIT$; } }                                // STATE_DECODE_REGISTERS
+
+            case 2: { DECODE_READY = 1; STATE = $STATE_DECODE_WAIT$; }                                                          // STATE_DECODE_BP_FLUSH_COMPLETE
+        }
+
+        if( BP_FLUSH ) { REGISTERS_ACK = 0; DECODE_READY = 0; STATE = $STATE_DECODE_BP_FLUSH_COMPLETE$; }                       // BP_FLUSH CLEAR THE PIPELINE
+        if( reset ) { REGISTERS_ACK = 0; DECODE_READY = 1; STATE = $STATE_DECODE_WAIT$; }                                       // ON RESET CLEAR THE PIPELINE
+    }
+}
+
+unit registers_latch(
+    input   uint1               clock_decode,
+    input   uint1               LATCH,
+
+    input   uint$addr_width$    DECODE_PC,
+    input   uint$addr_width$    DECODE_PC_INC,
+    input   uint$addr_width$    DECODE_BA,
+    input   uint32              DECODE_INSTRUCTION,
+    input   uint3               DECODE_PRED_TABLE,
+
+    output  uint$addr_width$    REGISTERS_PC,
+    output  uint$addr_width$    REGISTERS_PC_INC,
+    output  uint$addr_width$    REGISTERS_BA,
+    output  uint32              REGISTERS_INSTRUCTION,
+    output  uint16              REGISTERS_FLAGS,
+    output  uint3               REGISTERS_SR_F,
+    output  uint3               REGISTERS_SR,
+    output  uint3               REGISTERS_PRED_TABLE
+) <reginputs> {
+    cpu_instruction_flags DECODE_FLAGS <@clock_decode> ( INSTRUCTION <: DECODE_INSTRUCTION );
+    cpu_instruction_registers DECODE_REGISTERS <@clock_decode> ( INSTRUCTION <: DECODE_INSTRUCTION );
+
+    always {
+        if( LATCH ) {
+            REGISTERS_PC = DECODE_PC;
+            REGISTERS_PC_INC = DECODE_PC_INC;
+            REGISTERS_BA = DECODE_BA;
+            REGISTERS_INSTRUCTION = DECODE_INSTRUCTION;
+            REGISTERS_FLAGS = DECODE_FLAGS.FLAGS;
+            REGISTERS_SR_F = DECODE_REGISTERS.SR_F;
+            REGISTERS_SR = DECODE_REGISTERS.SR;
+            REGISTERS_PRED_TABLE = DECODE_PRED_TABLE;
+        }
+    }
+}
+
+unit cpu_instruction_registers(
+    input   uint32  INSTRUCTION,
+    output  uint3   SR_F,
+    output  uint3   SR
+) <reginputs> {
+    uint1   IS_MRET <::  ( ( CSR( INSTRUCTION ).opp == 7b1110011 ) & ( CSR( INSTRUCTION ).csr == 12b001100000010 ) );           // DETECT MRET
+
+    // { SR_F 3bxxx, SR 3bxxx }
+    brom uint6 decode_lookup[32] = {                                                                                            // PROVIDE BASE SR_F AND SR_NUM FOR EACH OPCODE
+        6b000001,    // LOAD             0
+        6b000001,    // FLOAD            1
+        6b000001,    // XHEAD EXTENSIONS 2   F7 CHECK
+        6b000000,    // FENCE            3
+        6b000001,    // ALU RI           4
+        6b000000,    // AUIPC            5
+        6b000001,    // ALU RI32         6
+        6b000000,    //                  7
+        6b000011,    // STORE            8
+        6b010011,    // FSTORE           9
+        6b000000,    //                  10
+        6b000001,    // ATOMIC           11  F7 CHECK
+        6b000011,    // ALU RR           12
+        6b000000,    // LUI              13
+        6b000011,    // ALU RR32         14
+        6b000000,    //                  15
+        6b111111,    // FUSED            16
+        6b111111,    // FUSED            17
+        6b111111,    // FUSED            18
+        6b111111,    // FUSED            19
+        6b011011,    // FPU              20 F7 CHECK
+        6b000000,    //                  21
+        6b000000,    //                  22
+        6b000000,    //                  23
+        6b000011,    // BRANCH           24
+        6b000001,    // JALR             25
+        6b000000,    //                  26
+        6b000000,    // JAL              27
+        6b000000,    // CSR              28 F7 CHECK
+        6b000000,    //                  29
+        6b000000,    //                  30
+        6b000000     //                  31
+    };
+
+    // { SR 3bxxx }
+    brom uint3 decode_lookup_thead[32] = {                                                                                            // PROVIDE BASE SR_F AND SR_NUM FOR EACH OPCODE
+        3b001,       //                 0 TH.ADDSL -> SHxADD
+        3b001,       //                 1
+        3b001,       //                 2 TH.SRRI -> RORI TH.SRRIW -> RORIW
+        3b001,       //                 3
+        3b111,       //                 4 TH.MULA TH.MULAW TH.MULS TH.MULSW
+        3b111,       //                 5 TH.MULAH TH.MULSH
+        3b001,       //                 6
+        3b001,       //                 7
+        3b111,       //                 8 TH.MVEQZ TH.MVNEZ
+        3b001,       //                 9
+        3b001,       //                 10
+        3b001,       //                 11
+        3b001,       //                 12
+        3b001,       //                 13
+        3b001,       //                 14
+        3b001,       //                 15
+        3b001,       //                 16 TH.FF0 TH.FF1 TH.REV -> REV8 TH.TSTNBZ
+        3b001,       //                 17 TH.TST -> BEXTI
+        3b001,       //                 18 TH.REVW
+        3b001,       //                 19
+        3b001,       //                 20
+        3b001,       //                 21
+        3b001,       //                 22
+        3b001,       //                 23
+        3b001,       //                 24
+        3b001,       //                 25
+        3b001,       //                 26
+        3b001,       //                 27
+        3b001,       //                 28
+        3b001,       //                 29
+        3b001,       //                 30
+        3b001,       //                 31
+    };
+
+    brom uint3 decode_lookup_thead_ls[64] = {
+        3b011,    // 00000    th.lrb
+        3b001,    // 00001
+        3b011,    // 00010    th.lurb
+        3b001,    // 00011
+        3b011,    // 00100    th.lrh
+        3b001,    // 00101
+        3b011,    // 00110    th.lurh
+        3b001,    // 00111
+        3b011,    // 01000    th.lrw
+        3b001,    // 01001
+        3b011,    // 01010    th.lurw
+        3b001,    // 01011
+        3b011,    // 01100    th.lrd
+        3b001,    // 01101
+        3b011,    // 01110    th.lurd
+        3b001,    // 01111
+        3b011,    // 10000    th.lbru
+        3b001,    // 10001
+        3b011,    // 10010    th.lurbu
+        3b001,    // 10011
+        3b011,    // 10100    th.lrhu
+        3b001,    // 10101
+        3b011,    // 10110    th.lurhu
+        3b001,    // 10111
+        3b011,    // 11000    th.lrwu
+        3b001,    // 11001
+        3b011,    // 11010    th.lurwu
+        3b001,    // 11011
+        3b001,    // 11100    th.lwd
+        3b001,    // 11101
+        3b001,    // 11110    th.lwud
+        3b001,    // 11111    th.ldd
+
+        3b111,    // 00000    th.srb
+        3b011,    // 00001
+        3b111,    // 00010    th.surb
+        3b011,    // 00011
+        3b111,    // 00100    th.srh
+        3b011,    // 00101
+        3b111,    // 00110    th.surh
+        3b011,    // 00111
+        3b111,    // 01000    th.srw
+        3b011,    // 01001
+        3b111,    // 01010    th.surw
+        3b011,    // 01011
+        3b111,    // 01100    th.srd
+        3b011,    // 01101
+        3b111,    // 01110    th.surd
+        3b011,    // 01111
+        3b011,    // 10000    th.
+        3b011,    // 10001    th.
+        3b011,    // 10010    th.
+        3b011,    // 10011    th.
+        3b011,    // 10100    th.
+        3b011,    // 10101    th.
+        3b011,    // 10110    th.
+        3b011,    // 10111    th.
+        3b011,    // 11000    th.
+        3b011,    // 11001    th.
+        3b011,    // 11010    th.
+        3b011,    // 11011    th.
+        3b111,    // 11100    th.swd
+        3b011,    // 11101    th.
+        3b011,    // 11110    th.
+        3b111     // 11111    th.sdd
+    };
+
+    // { SR_F 3bxxx, SR 3bxxx }
+    brom uint6 decode_lookup_fpu[32] = {                                                                                        // PROVIDE BASE SR_F AND SR_NUM FOR EACH F7 FOR THE NON-FUSED FPU
+        6b011011,    //  FADD            0
+        6b011011,    //  FSUB            1
+        6b011011,    //  FMUL            2
+        6b011011,    //  FDIV            3
+        6b011011,    //  FSNJ[N][X]      4
+        6b011011,    //  FMIN FMAX       5
+        6b011011,    //                  6
+        6b011011,    //                  7
+        6b001001,    //  FCVT F->F       8
+        6b011011,    //                  9
+        6b011011,    //                  10
+        6b001001,    //  FSQRT           11
+        6b011011,    //                  12
+        6b011011,    //                  13
+        6b011011,    //                  14
+        6b011011,    //                  15
+        6b011011,    //                  16
+        6b011011,    //                  17
+        6b011011,    //                  18
+        6b011011,    //                  19
+        6b011011,    //  FEQ FLT FLE     20
+        6b011011,    //                  21
+        6b011011,    //                  22
+        6b011011,    //                  23
+        6b001001,    //  FCVT F->I       24
+        6b011011,    //                  25
+        6b000001,    //  FCVT I->F       26
+        6b011011,    //                  27
+        6b001001,    //  FCLASS FMV F->I 28
+        6b011011,    //                  29
+        6b000001,    //  FLI FMV         30
+        6b011011     //                  31
+    };
+    decode_lookup.addr := Rtype( INSTRUCTION ).opp[2,5];
+    decode_lookup_fpu.addr := Rtype( INSTRUCTION ).f7[2,5];
+    decode_lookup_thead.addr := Rtype( INSTRUCTION ).f7[2,5];
+    decode_lookup_thead_ls.addr := { INSTRUCTION[12,1], INSTRUCTION[27,5] };
+
+    always {
+        SR_F = decode_lookup.rdata[3,3]; SR = decode_lookup.rdata[0,3];                                                     // SET SR_F and SR_NUM FROM LOOKUP TABLE
+
+        switch( INSTRUCTION[2,5] ) {                                                                                            // OVERRIDE LOOKUP TABLES FOR SPECIFIC INSTRUCTIONS
+            default: {}                                                                                                         //  USE SR_F AND SR_NUM FROM LOOKUP TABLE UNLESS OVERRIDDEN
+            case 5b00010: {                                                                                                     //  TH.HEAD EXTENSIONS
+                switch( Rtype( INSTRUCTION ).f3 ) {
+                    case 3b001: { SR_F = 3b000; SR = decode_lookup_thead.rdata; }                                               // ARITHMETIC xthead
+                    case 3b010: { SR_F = 3b000; SR = 3b001; }                                                                   // th.ext
+                    case 3b011: { SR_F = 3b000; SR = 3b001; }                                                                   // th.extu
+                    case 3b100: { SR_F = 3b000; SR = decode_lookup_thead_ls.rdata; }                                            // LOAD xtheadmemidx
+                    case 3b101: { SR_F = 3b000; SR = decode_lookup_thead_ls.rdata; }                                            // STORE xtheadmemidx
+                    case 3b110: { SR = 3b011; SR_F = 3b000; }                                                                   // th.flrd th.flrw th.flurd th.flurw
+                    case 3b111: { SR = 3b111; SR_F = 3b100; }                                                                   // th.fsrd th.fsrw th.fsurd th.fsurw
+                    default: {}
+                }
+            }
+            case 5b01011: {                                                                                                     //  LR.[W][D] SC.[W][D] ATOMIC LOAD - MODIFY - STORE
+                switch( Rtype( INSTRUCTION ).f7[2,5] ) {
+                    case 5b00010: {}                                                                                            //      LR.[W][D]
+                    default:      { SR = 3b011; }                                                                               //      SC.[W][D] ATOMIC LOAD - MODIFY - STORE
+                }
+            }
+
+            case 5b11100: {                                                                                                     //  CSR MRET ( ECALL WFI HANDLED BY FETCH UNIT )
+                SR = IS_MRET ? 0 : CSR( INSTRUCTION ).f3[2,1] ? 3b000 : 3b001;                                                  //      MRET OR DETECT IMMEDIATE NOT REGISTER SOURCE
+            }
+
+            case 5b10100: {                                                                                                     //  NON-FUSED FPU
+                SR_F = decode_lookup_fpu.rdata[3,3]; SR = decode_lookup_fpu.rdata[0,3];                                         //      SET SR_F and SR_NUM FROM LOOKUP TABLE
+            }
+        }
+    }
+}
+
+unit cpu_instruction_flags(
+    input   uint32  INSTRUCTION,
+    output  uint16  FLAGS
+) <reginputs> {
+    uint1   IS_DIVIDE <:: ( Rtype( INSTRUCTION ).f7 == 7b0000001 ) & Rtype( INSTRUCTION ).f3[2,1];                              // DETECT DIVIDE
+    uint1   IS_MRET <::  ( ( CSR( INSTRUCTION ).opp == 7b1110011 ) & ( CSR( INSTRUCTION ).csr == 12b001100000010 ) );           // DETECT MRET
+
+    // FLAGS = { CUSTION, BRANCH, STORE, LOAD, JUMP, FPU_FAST, FPU_CONVERT, FPU, FENCE, CSR, ATOMIC, ALU_SIGNX, ALU_FAST, ALU, WR_F, WR }
+    $$ IS_CUSTOM        = ( 1 << 15 )
+    $$ IS_BRANCH        = ( 1 << 14 )
+    $$ IS_STORE         = ( 1 << 13 )
+    $$ IS_LOAD          = ( 1 << 12 )
+    $$ IS_JUMP          = ( 1 << 11 )
+    $$ IS_FPUFAST       = ( 1 << 10 )
+    $$ IS_FPUCONVERT    = ( 1 <<  9 )
+    $$ IS_FPU           = ( 1 <<  8 )
+    $$ IS_FENCE         = ( 1 <<  7 )
+    $$ IS_CSR           = ( 1 <<  6 )
+    $$ IS_ATOMIC        = ( 1 <<  5 )
+    $$ IS_ALUSIGNX      = ( 1 <<  4 )
+    $$ IS_ALUFAST       = ( 1 <<  3 )
+    $$ IS_ALU           = ( 1 <<  2 )
+    $$ IS_WR_F          = ( 1 <<  1 )
+    $$ IS_WR            = ( 1 <<  0 )
+
+    brom uint16 flags_lookup[32] = {                                                                                            // PROVIDE BASE FLAGS FOR EACH OPCODE
+        $IS_LOAD | IS_WR$,                              // LOAD             0
+        $IS_LOAD | IS_WR_F | IS_WR$,                    // FLOAD            1
+        $IS_CUSTOM | IS_ALUFAST | IS_ALU | IS_WR$,      // XTHEAD           2   XTHEAD INSTRUCTIONS FOR INTEGER REGISTERS
+        $IS_FENCE$,                                     // FENCE            3
+        $IS_ALUFAST | IS_ALU | IS_WR$,                  // ALU RI           4
+        $IS_WR$,                                        // AUIPC            5
+        $IS_ALUSIGNX | IS_ALUFAST | IS_ALU | IS_WR$,    // ALU RI32         6   F7 CHECK FOR SIGN EXTENSION
+        0,                                              //                  7
+        $IS_STORE$,                                     // STORE            8
+        $IS_STORE$,                                     // FSTORE           9
+        0,                                              //                  10
+        $IS_LOAD | IS_STORE | IS_ATOMIC | IS_WR$,       // ATOMIC           11  F7 CHECK
+        $IS_ALUFAST | IS_ALU | IS_WR$,                  // ALU RR           12  F7 CHECK FOR DIVISION
+        $IS_WR$,                                        // LUI              13
+        $IS_ALUFAST | IS_ALU | IS_WR$,                  // ALU RR32         14  F7 CHECK FOR DIVISION AND SIGN EXTENSION
+        0,                                              //                  15
+        $IS_FPU | IS_WR_F | IS_WR$,                     // FUSED            16
+        $IS_FPU | IS_WR_F | IS_WR$,                     // FUSED            17
+        $IS_FPU | IS_WR_F | IS_WR$,                     // FUSED            18
+        $IS_FPU | IS_WR_F | IS_WR$,                     // FUSED            19
+        $IS_FPU | IS_WR_F | IS_WR$,                     // FPU              20 F7 CHECK
+        0,                                              //                  21
+        0,                                              //                  22
+        0,                                              //                  23
+        $IS_BRANCH$,                                    // BRANCH           24
+        $IS_JUMP | IS_WR$,                              // JALR             25
+        0,                                              //                  26
+        $IS_WR$,                                        // JAL              27 NOT MARKED AS JUMP AS HANDLED BY FETCH UNIT
+        $IS_CSR | IS_WR$,                               // CSR              28 F7 CHECK
+        0,                                              //                  29
+        0,                                              //                  30
+        0                                               //                  31
+    };
+    brom uint16 flags_lookup_fpu[32] = {                                                                                        // PROVIDE BASE FLAGS FOR EACH F7 FOR THE NONE FUSED FPU
+        $IS_FPU | IS_WR_F | IS_WR$,                     //  FADD            0
+        $IS_FPU | IS_WR_F | IS_WR$,                     //  FSUB            1
+        $IS_FPU | IS_WR_F | IS_WR$,                     //  FMUL            2
+        $IS_FPU | IS_WR_F | IS_WR$,                     //  FDIV            3
+        $IS_FPUFAST | IS_FPU | IS_WR_F | IS_WR$,        //  FSNJ[N][X]      4
+        $IS_FPUFAST | IS_FPU | IS_WR_F | IS_WR$,        //  FMIN FMAX       5
+        0,                                              //                  6
+        0,                                              //                  7
+        $IS_FPUCONVERT | IS_FPU | IS_WR_F | IS_WR$,     //  FCVT F->F       8
+        0,                                              //                  9
+        0,                                              //                  10
+        $IS_FPU | IS_WR_F | IS_WR$,                     //  FSQRT           11
+        0,                                              //                  12
+        0,                                              //                  13
+        0,                                              //                  14
+        0,                                              //                  15
+        0,                                              //                  16
+        0,                                              //                  17
+        0,                                              //                  18
+        0,                                              //                  19
+        $IS_FPUFAST | IS_FPU | IS_WR$,                  //  FEQ FLT FLE     20
+        0,                                              //                  21
+        0,                                              //                  22
+        0,                                              //                  23
+        $IS_FPUCONVERT | IS_FPU | IS_WR$,               //  FCVT F->I       24
+        0,                                              //                  25
+        $IS_FPUCONVERT | IS_FPU | IS_WR_F | IS_WR$,     //  FCVT I->F       26
+        0,                                              //                  27
+        $IS_FPUFAST | IS_FPU | IS_WR$,                  //  FCLASS FMV F->I 28
+        0,                                              //                  29
+        $IS_FPUFAST | IS_FPU | IS_WR_F | IS_WR$,        //  FLI FMV         30
+        0                                               //                  31
+    };
+    flags_lookup.addr := Rtype( INSTRUCTION ).opp[2,5];
+    flags_lookup_fpu.addr := Rtype( INSTRUCTION ).f7[2,5];
+
+    always {
+        FLAGS = flags_lookup.rdata;                                                                                             // SET FLAGS FROM LOOKUP TABLE
+
+        switch( INSTRUCTION[2,5] ) {
+            default: {}                                                                                                         // USE FLAGSFROM LOOKUP TABLE UNLESS OVERRIDDEN
+            case 5b00010: {                                                                                                     //  CUSTOM XTHEAD INSTRUCTIONS
+                switch( Rtype( INSTRUCTION ).f3 ) {
+                    default: {
+                        if( ( INSTRUCTION[27,5] == 5b00100 ) | ( INSTRUCTION[27,5] == 5b00101 ) ) {
+                            FLAGS = ( |INSTRUCTION[26,2] ? $IS_ALUSIGNX$ : 0 ) | $IS_CUSTOM | IS_ALUFAST | IS_ALU | IS_WR$;     //      SIGN EXTENSION FOR MAC W AND H VARIATIONS
+                        }
+                    }
+                    case 3b100: { FLAGS = $IS_CUSTOM | IS_LOAD | IS_WR$; }
+                    case 3b101: { FLAGS = $IS_CUSTOM | IS_STORE$; }
+                    case 3b110: { FLAGS = $IS_CUSTOM | IS_LOAD | IS_WR_F | IS_WR$; }
+                    case 3b111: { FLAGS = $IS_CUSTOM | IS_STORE$; }
+                }
+            }
+            case 5b00110: {                                                                                                     //  REGISTER-IMMEDIATE ALU 32BIT
+                if( ( ItypeSHIFT( INSTRUCTION ).f7[1,6] == 6b000010 ) & ( ItypeSHIFT( INSTRUCTION ).f3 == 3b001 ) ) {
+                    FLAGS = $IS_ALUFAST | IS_ALU | IS_WR$;                                                                      //      NO SIGN EXTENSION FOR SLLI.UW
+                }
+            }
+            case 5b01100: { if( IS_DIVIDE ) { FLAGS = $IS_ALU | IS_WR$; } }                                                     //  REGISTER-REGISTER ALU, DIVIDE IS NOT FAST
+            case 5b01110: {                                                                                                     //  REGISTER-REGISTER ALU 32BIT
+                FLAGS = ( ( ( Rtype( INSTRUCTION ).f7 == 7b0000100 )  & ( Rtype( INSTRUCTION ).f3 == 3b000 ) ) |                //      DETECT ADD.UW ( f3 == 000 )
+                            ( Rtype( INSTRUCTION ).f7 == 7b0010000 ) ) ?                                                        //      DETECT SHxADD.UW ( f3 == 010 100 110 )
+                        $IS_ALUFAST | IS_ALU | IS_WR$ :                                                                         //      NO SIGN EXTENSION FOR ADD.UW SHxADD.UW
+                        ( IS_DIVIDE ? 0 : $IS_ALUFAST$ ) | $IS_ALUSIGNX | IS_ALU | IS_WR$;                                      //      DIVIDE IS NOT FAST
+            }
+            case 5b01011: {                                                                                                     //  LR.[W][D] SC.[W][D] ATOMIC LOAD - MODIFY - STORE
+                switch( Rtype( INSTRUCTION ).f7[2,5] ) {
+                    case 5b00010: { FLAGS = $IS_LOAD | IS_ATOMIC | IS_WR$; }                                                    //      LR.[W][D]
+                    case 5b00011: { FLAGS = $IS_STORE | IS_ATOMIC | IS_WR$; }                                                   //      SC.[W][D]
+                    default:      {}                                                                                            //      ATOMIC LOAD - MODIFY - STORE
+                }
+            }
+            case 5b11100: { if( IS_MRET ) { FLAGS = $IS_CSR | IS_JUMP$; } }                                                     //  CSR MRET ( ECALL WFI HANDLED BY FETCH UNIT )
+            case 5b10100: { FLAGS = flags_lookup_fpu.rdata; }                                                                   //  NON-FUSED FPU SET FLAGS FROM LOOKUP TABLE
+        }
+    }
+}
