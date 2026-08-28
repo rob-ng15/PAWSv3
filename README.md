@@ -1,6 +1,6 @@
 # PAWSv3
 
-The PAWS Risc-V FPGA Project, with an updated pipelined CPU, and a shared memory bus and a simple branch prediction mechanism.
+The PAWS Risc-V FPGA Project, with an updated pipelined CPU, a shared memory bus and a simple branch prediction mechanism.
 
 A 64-bit Risc-V CPU, with an FPU, plus various extensions to allow for more compact code. Implements some of the xthead* extensions.
 
@@ -14,7 +14,7 @@ xtheadcondmov DOOM does not execute correctly. xtheadmempar does not work correc
 
 # Notes
 
-DOOM does not work properly if the xtheadcondmov extension is used. Other software does. Quake and Zork do not presently work correctly. OUTRUN demo is working properly, with noine of the graphical glitches present on the PAWSv2 version.
+DOOM does not work properly if the xtheadcondmov extension is used. Other software does. Quake and Zork do not presently work correctly. OUTRUN demo is working properly, with none of the graphical glitches present on the PAWSv2 version.
 
 Does not presently build with yosys beyond 0.64. Not sure why.
 
@@ -27,11 +27,11 @@ The code is presently written using units with cascading inputs/outputs to gener
 
 P1 - Fetch
 
-Fetches instructions from memory or L1 instruction cache. Expands compressed instructions, and some xthead* extensions into multiple instructions. Handles interupt jumps. Handles branch prediction and recovery when incorrect prediction made. Handles code-flow jumps, will stall until the address is confirmed.
+Fetches instructions from memory or L1 instruction cache. Expands compressed instructions, and some xthead* extensions into multiple instructions, translating others into their official Risc-V extension equivalents. Handles interupts. Handles branch prediction and recovery when incorrect prediction made. Handles code flow jumps, will stall until the address is confirmed.
 
 P2 - Decode
 
-Decodes the instruction entering the pipeline, setting execution flags and determnes number of source and destination registers, and if floating-point or integer.
+Decodes the instruction entering the pipeline, setting execution flags and determines number of source and destination registers, and if floating-point or integer.
 
 P3 - Registers
 
@@ -48,4 +48,6 @@ Each unit handles the execution of the instructions, and submits the results to 
 P6 - COMMIT INTEGER and COMMIT FLOATING-POINT
 
 Writes the results from the execution units to the appropriate register bank. 1 integer and 1 floating-point commit can be made simultaneously.
+
+Notes that instructions can commit out of code order. If there is a data hazard the instruction will not have moved beyound the register stage of the pipeline.
 
