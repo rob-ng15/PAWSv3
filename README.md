@@ -1,4 +1,4 @@
-# PAWSv3
+o# PAWSv3
 
 The PAWS Risc-V FPGA Project, with an updated pipelined CPU, a shared memory bus and a simple branch prediction mechanism.
 
@@ -51,3 +51,9 @@ Writes the results from the execution units to the appropriate register bank. 1 
 
 Notes that instructions can commit out of code order. If there is a data hazard the instruction will not have moved beyound the register stage of the pipeline.
 
+
+# To Do
+
+Ensure that Store instructions are counted. If they do not write to a register they are not counted as an executed instruction.
+
+Reinstate the misaligned loads and stores, which should restore Quake and Zork to a working condition.
