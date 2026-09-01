@@ -1,4 +1,4 @@
-o# PAWSv3
+# PAWSv3
 
 The PAWS Risc-V FPGA Project, with an updated pipelined CPU, a shared memory bus and a simple branch prediction mechanism.
 
@@ -54,6 +54,8 @@ Notes that instructions can commit out of code order. If there is a data hazard 
 
 # To Do
 
-Ensure that Store instructions are counted. If they do not write to a register they are not counted as an executed instruction.
+Ensure that Store instructions are counted. If they do not write to a register they are not presently counted as an executed instruction.Change required in TOP and LSA.
 
 Reinstate the misaligned loads and stores, which should restore Quake and Zork to a working condition.
+
+Implement more interrupts, including ECALL and an HBLANK on a selectable line.
