@@ -197,8 +197,8 @@ unit cpu(
         $$end
 
         EXECUTE_CSRFPU_ACK <: DISPATCH.EXECUTE_CSRFPU_ACK,                                                                      //  STAGE 4B PIPELINE ACKNOWLEDGE FLAG
-        EXECUTE_CSRFPU_INSTRUCTION <: DISPATCH.EXECUTE_CSRFPU_INSTRUCTION,                                                      //  INSTRUCTION
-        EXECUTE_CSRFPU_FLAGS <: DISPATCH.EXECUTE_CSRFPU_FLAGS,                                                                  //  PIPELINE INSTRUCTION FLAGS
+        CSRFPU_INSTRUCTION <: DISPATCH.EXECUTE_CSRFPU_INSTRUCTION,                                                      //  INSTRUCTION
+        CSRFPU_FLAGS <: DISPATCH.EXECUTE_CSRFPU_FLAGS,                                                                  //  PIPELINE INSTRUCTION FLAGS
 
         COMMIT_EXECUTE_CSRFPU_RESULT_ACK <: COMMIT_I.COMMIT_EXECUTE_CSRFPU_RESULT_ACK,                                          //  STAGE 6 COMMIT I READY FLAG
         COMMIT_F_EXECUTE_CSRFPU_RESULT_F_ACK <: COMMIT_F.COMMIT_F_EXECUTE_CSRFPU_RESULT_F_ACK,                                  //  STAGE 6 COMMIT F READY FLAG
@@ -312,7 +312,9 @@ unit cpu(
                                         COMMIT_F.COMMIT_F_EXECUTE_CSRFPU_RESULT_F_ACK |
                                         COMMIT_F.COMMIT_F_EXECUTE_LSA_RESULT_F_ACK
                                       ) +
-                                        AGU.BP_TAKEN;
+                                        AGU.BP_TAKEN
+                                        +
+                                        EXECUTE_LSA.STORE_BYPASS;
 
     always {
         onehot( STATE ) {

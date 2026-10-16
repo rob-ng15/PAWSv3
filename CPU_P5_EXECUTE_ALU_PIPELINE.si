@@ -67,23 +67,24 @@ unit cpu_execute_alu(
 
         ALU_READY <: EXECUTE.COMMIT_RESULT_READY,
         ALU_RESULT <: EXECUTE.COMMIT_RESULT,
-        ALU_DESTREG <: EXECUTE.COMMIT_DESTREG,
 
         ALU_ADD_READY <: EXECUTE_ADD.COMMIT_RESULT_READY,
         ALU_ADD_RESULT <: EXECUTE_ADD.COMMIT_RESULT,
-        ALU_ADD_DESTREG <: EXECUTE_ADD.COMMIT_DESTREG,
 
         ALU_CSX_READY <: EXECUTE_CSX.COMMIT_RESULT_READY,
+        ALU_CSX_RESULT <: EXECUTE_CSX.COMMIT_RESULT,
 
         ALU_LOGIC_READY <: EXECUTE_LOGIC.COMMIT_RESULT_READY,
+        ALU_LOGIC_RESULT <: EXECUTE_LOGIC.COMMIT_RESULT,
 
         ALU_MUL_READY <: EXECUTE_MUL.COMMIT_RESULT_READY,
         ALU_MUL_RESULT <: EXECUTE_MUL.COMMIT_RESULT,
-        ALU_MUL_DESTREG <: EXECUTE_MUL.COMMIT_DESTREG,
 
         ALU_COND_READY <: EXECUTE_COND.COMMIT_RESULT_READY,
+        ALU_COND_RESULT <: EXECUTE_COND.COMMIT_RESULT,
 
-        ALU_MNMX_READY <: EXECUTE_MNMX.COMMIT_RESULT_READY
+        ALU_MNMX_READY <: EXECUTE_MNMX.COMMIT_RESULT_READY,
+        ALU_MNMX_RESULT <: EXECUTE_MNMX.COMMIT_RESULT
     );
 
     uint1               IS_ADDSUB <:: ~|$ISN_F3$ | $is_shxadd$ ;
@@ -131,6 +132,8 @@ unit cpu_execute_alu(
             }
             case 1: {
                 if( EXECUTE.READY ) {
+                    COMMIT.ALU_DESTREG = $REG_RD$;
+
                     EXECUTE.INSTRUCTION = $ISN$;
                     EXECUTE.CUSTOM = $ISN_CUSTOM$;
                     EXECUTE.I1 = $REG_I1$;
@@ -144,6 +147,7 @@ unit cpu_execute_alu(
             case 2: {
                 if( EXECUTE_MUL.READY ) {
                     EXECUTE_MUL.DESTREG = $REG_RD$;
+                    COMMIT.ALU_MUL_DESTREG = $REG_RD$;
                     EXECUTE_MUL.SIGNX = $ISN_SIGNX$;
 
                     EXECUTE_MUL.RESULT = $ISN_CUSTOM$ ? $ISN$[25,1] ? ( ( $ISN$[26,1] ? $REG_I3$[0,32] : $REG_I3$ ) - MAC_R ) : // TH.MUL[H|W][S|A]
@@ -156,6 +160,7 @@ unit cpu_execute_alu(
             case 3: {
                 if( EXECUTE_ADD.READY ) {
                     EXECUTE_ADD.DESTREG = $REG_RD$;
+                    COMMIT.ALU_ADD_DESTREG = $REG_RD$;
 
                     EXECUTE_ADD.RESULT = EXECUTE_ALU_ALUOP[12,1] ? ( ( $IS_32$ ? $REG_I1$[0,32] : $REG_I1$ )                    // SUB[W]
                                                                    -
@@ -175,9 +180,9 @@ unit cpu_execute_alu(
                     COMMIT.ALU_LOGIC_DESTREG = $REG_RD$;
 
                     switch( $ISN_F3$[0,2] ) {
-                        case 2b00: { COMMIT.ALU_LOGIC_RESULT = $REG_I1$ ^ LOGIC_I2; }                                           // X[N]OR
-                        case 2b10: { COMMIT.ALU_LOGIC_RESULT = $REG_I1$ | LOGIC_I2; }                                           // OR[N]
-                        default:   { COMMIT.ALU_LOGIC_RESULT = $REG_I1$ & LOGIC_I2; }                                           // AND[N]
+                        case 2b00: { EXECUTE_LOGIC.RESULT = $REG_I1$ ^ LOGIC_I2; }                                           // X[N]OR
+                        case 2b10: { EXECUTE_LOGIC.RESULT = $REG_I1$ | LOGIC_I2; }                                           // OR[N]
+                        default:   { EXECUTE_LOGIC.RESULT = $REG_I1$ & LOGIC_I2; }                                           // AND[N]
                     }
 
                     EXECUTE_LOGIC.START = 1; EXECUTE_ALU_READY = 1; STATE = 1;
@@ -189,20 +194,20 @@ unit cpu_execute_alu(
                     COMMIT.ALU_CSX_DESTREG = $REG_RD$;
 
                     if( $ISN_CUSTOM$ ) {
-                        COMMIT.ALU_CSX_RESULT = ( $ISN$[25,1] ? ~|$REG_I1$ : &$REG_I1$ ) ? 64 : ~CLZ;                           // TH.FF1 TH.FF0
+                        EXECUTE_CSX.RESULT = ( $ISN$[25,1] ? ~|$REG_I1$ : &$REG_I1$ ) ? 64 : ~CLZ;                           // TH.FF1 TH.FF0
                     } else {
                         if( ~$REG_S2$[2,1] ) {                                                                                  // CLZ[W] CTZ[W] CPOP[W]
                             if( ( ~$IS_32$ & |$REG_I1$ ) | ( $IS_32$ & |$REG_I1$[0,32] ) ) {                                    // CHECK FOR SPECIAL CASES
                                 switch( $REG_S2$[0,2] ) {
-                                    case 2b00: { COMMIT.ALU_CSX_RESULT = CLZ; }
-                                    case 2b01: { ( COMMIT.ALU_CSX_RESULT ) =  ctz_silice_64( $IS_32$ ? { 32hffffffff, $REG_I1$[0,32] } : $REG_I1$ ); }
-                                    default:   { ( COMMIT.ALU_CSX_RESULT ) = cpop_silice_64( $IS_32$ ?                $REG_I1$[0,32] :   $REG_I1$ ); }
+                                    case 2b00: { EXECUTE_CSX.RESULT = CLZ; }
+                                    case 2b01: { ( EXECUTE_CSX.RESULT ) =  ctz_silice_64( $IS_32$ ? { 32hffffffff, $REG_I1$[0,32] } : $REG_I1$ ); }
+                                    default:   { ( EXECUTE_CSX.RESULT ) = cpop_silice_64( $IS_32$ ?                $REG_I1$[0,32] :   $REG_I1$ ); }
                                 }
                             } else {
-                                COMMIT.ALU_CSX_RESULT = { ~$IS_32$ & ~$REG_S2$[1,1], $IS_32$ & ~$REG_S2$[1,1], 5b00000 };       // REPORT 32/64 FOR CTZ/CLZ AND 0 FOR CPOP IF SOURCEREG1 == 0
+                                EXECUTE_CSX.RESULT = { ~$IS_32$ & ~$REG_S2$[1,1], $IS_32$ & ~$REG_S2$[1,1], 5b00000 };       // REPORT 32/64 FOR CTZ/CLZ AND 0 FOR CPOP IF SOURCEREG1 == 0
                             }
                         } else {
-                            COMMIT.ALU_CSX_RESULT = $REG_S2$[0,1] ? { {48{$REG_I1$[15,1]}}, $REG_I1$[0,16] } :                  // SEXT.H
+                            EXECUTE_CSX.RESULT = $REG_S2$[0,1] ? { {48{$REG_I1$[15,1]}}, $REG_I1$[0,16] } :                  // SEXT.H
                                                                     { {56{$REG_I1$[ 7,1]}}, $REG_I1$[0, 8] };                   // SEXT.B
                         }
                     }
@@ -216,15 +221,15 @@ unit cpu_execute_alu(
                     COMMIT.ALU_COND_DESTREG = $REG_RD$;
 
                     if( $ISN_CUSTOM$ ) {
-                        COMMIT.ALU_COND_RESULT = ( $ISN$[25,1] ? COND_SR2_N0 : ~COND_SR2_N0 ) ? $REG_I1$ : $REG_I3$;           // TH.MVEQZ TH.MVNEZ
+                        EXECUTE_COND.RESULT = ( $ISN$[25,1] ? COND_SR2_N0 : ~COND_SR2_N0 ) ? $REG_I1$ : $REG_I3$;           // TH.MVEQZ TH.MVNEZ
                     } else {
                         switch( $ISN_F3$ ) {
-                            case 3b010: { COMMIT.ALU_COND_RESULT = $I1I2_LT$; }                                                     // SLT[I]
+                            case 3b010: {EXECUTE_COND.RESULT = $I1I2_LT$; }                                                     // SLT[I]
                             case 3b011: {
-                                COMMIT.ALU_COND_RESULT = $ISN$[5,1] ? ( ~|$REG_S1$ ) ? COND_SR2_N0 : $I1I2_LTU$ :                   // SLTU  ( RS1==x0 ? op2!=0 : op1<op2 )
+                               EXECUTE_COND.RESULT = $ISN$[5,1] ? ( ~|$REG_S1$ ) ? COND_SR2_N0 : $I1I2_LTU$ :                   // SLTU  ( RS1==x0 ? op2!=0 : op1<op2 )
                                                                     ( $REG_I2$ == 1 ) ? ~|$REG_I1$ : $I1I2_LTU$;                  // SLTIU ( op2==1  ? RS1==0 : op1<op2 )
                             }
-                            default: { COMMIT.ALU_COND_RESULT = ( $ISN_F3$[1,1] ? COND_SR2_N0 : ~COND_SR2_N0 ) ? 0 : $REG_I1$; }                  // CZERO.EQZ CZERO.NEZ
+                            default: {EXECUTE_COND.RESULT = ( $ISN_F3$[1,1] ? COND_SR2_N0 : ~COND_SR2_N0 ) ? 0 : $REG_I1$; }                  // CZERO.EQZ CZERO.NEZ
                         }
                     }
 
@@ -236,7 +241,7 @@ unit cpu_execute_alu(
                     EXECUTE_MNMX.DESTREG = $REG_RD$;
                     COMMIT.ALU_MNMX_DESTREG = $REG_RD$;
 
-                    COMMIT.ALU_MNMX_RESULT = ( ( $ISN_F3$[0,1] ? $I1I2_LTU$ : $I1I2_LT$ ) ^ $ISN_F3$[1,1] ) ? $REG_I1$ :        // MIN[U] MAX[U]
+                    EXECUTE_MNMX.RESULT = ( ( $ISN_F3$[0,1] ? $I1I2_LTU$ : $I1I2_LT$ ) ^ $ISN_F3$[1,1] ) ? $REG_I1$ :        // MIN[U] MAX[U]
                                                                                                               $REG_I2$;
 
                     EXECUTE_MNMX.START = 1; EXECUTE_ALU_READY = 1; STATE = 1;
@@ -285,8 +290,7 @@ unit alu_execute(
 
     input   uint1               COMMIT_ACK,
     output  uint1               COMMIT_RESULT_READY,
-    output  uint64              COMMIT_RESULT,
-    output  uint5               COMMIT_DESTREG
+    output  uint64              COMMIT_RESULT
 ) <reginputs> {
     uint3               STATE = 1;
 
@@ -331,12 +335,12 @@ unit alu_execute(
 
         onehot( STATE ) {
             case 0: {
+                RD = START << Rtype( INSTRUCTION ).rd;
                 if( START ) {
-                    READY = 0; STATE = 2; RD[ Rtype( INSTRUCTION ).rd, 1 ] = 1; MASK[ SHIFT,1 ] = 1;
+                    READY = 0; STATE = 2; MASK[ SHIFT,1 ] = 1;
                 }
             }
             case 1: {
-                COMMIT_DESTREG = Rtype( INSTRUCTION ).rd;
                 if( CUSTOM ) {
                     COMMIT_RESULT = $doorcxperm$ ? ~ORCB : $dorev$ ? REV[32,32] : Rtype( INSTRUCTION ).f3[0,1] ? SRL : SRA;
                 } else {
@@ -361,9 +365,9 @@ unit alu_execute(
                                 {                  I2[0,32], I1[0,32] } :                                                        // PACK  ( low 32 bits of RS1 RS2 into rd, ZEXT.H when Rtype( INSTRUCTION ).sr2 == 0 )                                                                        // PACKW PACK
                                                     {                                                                                                       // XPERMB
                                 $$for i=0,6 do
-                                I2[ $(8-i)*8-1$,1 ] ? 8h0 : I1[ { I2[ $(8-i)*8-4$, 3 ], 3b000 }, 8 ],
+                                I2[ $(7-i)*8+3$,5 ] ? 8h0 : I1[ { I2[ $(8-i)*8-4$, 3 ], 3b000 }, 8 ],
                                 $$end
-                                I2[           7,1 ] ? 8h0 : I1[ {           I2[ 0, 3 ], 3b000 }, 8 ]
+                                |I2[           3,5 ] ? 8h0 : I1[ {           I2[ 0, 3 ], 3b000 }, 8 ]
                         };
                         }
                         case 3b101: {
@@ -399,18 +403,16 @@ unit alu_add_execute(
 
     input   uint1               COMMIT_ACK,
     output  uint1               COMMIT_RESULT_READY,
-    output  uint64              COMMIT_RESULT,
-    output  uint5               COMMIT_DESTREG
+    output  uint64              COMMIT_RESULT
 ) <reginputs> {
     uint3               STATE = 1;
 
-    COMMIT_DESTREG := DESTREG;
     COMMIT_RESULT := { SIGNX ? {32{RESULT[31, 1]}} : RESULT[32,32], RESULT[0, 32] };
     COMMIT_RESULT_READY := STATE[2,1];
 
     always {
         onehot( STATE ) {
-            case 0: { if( START ) { READY = 0; STATE = 2; RD[ DESTREG, 1 ] = 1; } }
+            case 0: { RD = START << DESTREG; if( START ) { READY = 0; STATE = 2; } }
             case 1: { STATE = 4; }
             case 2: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
         }
@@ -425,19 +427,20 @@ unit alu_cond_execute(
     output  uint32              RD,
 
     input   uint5               DESTREG,
+    input   uint64              RESULT,
 
+    output  uint64              COMMIT_RESULT,
     input   uint1               COMMIT_ACK,
-    output  uint1               COMMIT_RESULT_READY,
-    output  uint5               COMMIT_DESTREG
+    output  uint1               COMMIT_RESULT_READY
 ) <reginputs> {
     uint3               STATE = 1;
 
-    COMMIT_DESTREG := DESTREG;
+    COMMIT_RESULT := RESULT;
     COMMIT_RESULT_READY := STATE[2,1];
 
     always {
         onehot( STATE ) {
-            case 0: { if( START ) { READY = 0; STATE = 2; RD[ DESTREG, 1 ] = 1; } }
+            case 0: { RD = START << DESTREG; if( START ) { READY = 0; STATE = 2; } }
             case 1: { STATE = 4; }
             case 2: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
         }
@@ -452,18 +455,20 @@ unit alu_csx_execute(
     output  uint32              RD,
 
     input   uint5               DESTREG,
+    input   uint64              RESULT,
 
+    output  uint64              COMMIT_RESULT,
     input   uint1               COMMIT_ACK,
-    output  uint1               COMMIT_RESULT_READY,
-    output  uint5               COMMIT_DESTREG
+    output  uint1               COMMIT_RESULT_READY
 ) <reginputs> {
     uint3               STATE = 1;
 
+    COMMIT_RESULT := RESULT;
     COMMIT_RESULT_READY := STATE[2,1];
 
     always {
         onehot( STATE ) {
-            case 0: { if( START ) { READY = 0; STATE = 2; RD[ DESTREG, 1 ] = 1; } }
+            case 0: { RD = START << DESTREG; if( START ) { READY = 0; STATE = 2; } }
             case 1: { STATE = 4; }
             case 2: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
         }
@@ -478,17 +483,20 @@ unit alu_logic_execute(
     output  uint32              RD,
 
     input   uint5               DESTREG,
+    input   uint64              RESULT,
 
+    output  uint64              COMMIT_RESULT,
     input   uint1               COMMIT_ACK,
     output  uint1               COMMIT_RESULT_READY
 ) <reginputs> {
     uint3               STATE = 1;
 
+    COMMIT_RESULT := RESULT;
     COMMIT_RESULT_READY := STATE[2,1];
 
     always {
         onehot( STATE ) {
-            case 0: { if( START ) { READY = 0; STATE = 2; RD[ DESTREG, 1 ] = 1; } }
+            case 0: { RD = START << DESTREG; if( START ) { READY = 0; STATE = 2; } }
             case 1: { STATE = 4; }
             case 2: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
         }
@@ -503,17 +511,20 @@ unit alu_mnmx_execute(
     output  uint32              RD,
 
     input   uint5               DESTREG,
+    input   uint64              RESULT,
 
+    output  uint64              COMMIT_RESULT,
     input   uint1               COMMIT_ACK,
     output  uint1               COMMIT_RESULT_READY
 ) <reginputs> {
     uint3               STATE = 1;
 
+    COMMIT_RESULT := RESULT;
     COMMIT_RESULT_READY := STATE[2,1];
 
     always {
         onehot( STATE ) {
-            case 0: { if( START ) { READY = 0; STATE = 2; RD[ DESTREG, 1 ] = 1; } }
+            case 0: { RD = START << DESTREG; if( START ) { READY = 0; STATE = 2; } }
             case 1: { STATE = 4; }
             case 2: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
         }
@@ -533,18 +544,16 @@ unit alu_mul_execute(
 
     input   uint1               COMMIT_ACK,
     output  uint1               COMMIT_RESULT_READY,
-    output  uint64              COMMIT_RESULT,
-    output  uint5               COMMIT_DESTREG
+    output  uint64              COMMIT_RESULT
 ) <reginputs> {
     uint3               STATE = 1;
 
-    COMMIT_DESTREG := DESTREG;
     COMMIT_RESULT := { SIGNX ? {32{RESULT[31,1]}} : RESULT[32,32], RESULT[0, 32] };
     COMMIT_RESULT_READY := STATE[2,1];
 
     always {
         onehot( STATE ) {
-            case 0: { if( START ) { READY = 0; STATE = 2; RD[ DESTREG, 1 ] = 1; } }
+            case 0: { RD = START << DESTREG; if( START ) { READY = 0; STATE = 2; } }
             case 1: { STATE = 4; }
             case 2: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
         }
@@ -605,53 +614,54 @@ unit alu_commit(
     ALU_MNMX_ACK := 0;
 
     RESULT_READY := ALU_READY | ALU_ADD_READY | ALU_CSX_READY | ALU_LOGIC_READY | ALU_MUL_READY | ALU_COND_READY | ALU_MNMX_READY;
-        RD := 1 << (
-                          ALU_READY ? ALU_DESTREG :
-                      ALU_ADD_READY ? ALU_ADD_DESTREG :
-                      ALU_CSX_READY ? ALU_CSX_DESTREG :
-                      ALU_LOGIC_READY ? ALU_LOGIC_DESTREG :
-                      ALU_MUL_READY ? ALU_MUL_DESTREG :
-                      ALU_COND_READY ? ALU_COND_DESTREG :
-                      ALU_MNMX_READY ? ALU_MNMX_DESTREG :
-                                      0
-                  );
+    RD := RESULT_READY << (
+                        ALU_READY ? ALU_DESTREG :
+                    ALU_ADD_READY ? ALU_ADD_DESTREG :
+                    ALU_CSX_READY ? ALU_CSX_DESTREG :
+                    ALU_LOGIC_READY ? ALU_LOGIC_DESTREG :
+                    ALU_MUL_READY ? ALU_MUL_DESTREG :
+                    ALU_COND_READY ? ALU_COND_DESTREG :
+                    ALU_MNMX_READY ? ALU_MNMX_DESTREG :
+                                    0
+                );
+
+    COMMIT_ALU_RESULT := ALU_READY ? ALU_RESULT :
+                         ALU_ADD_READY ? ALU_ADD_RESULT :
+                         ALU_CSX_READY ? ALU_CSX_RESULT :
+                         ALU_LOGIC_READY ? ALU_LOGIC_RESULT :
+                         ALU_MUL_READY ? ALU_MUL_RESULT :
+                         ALU_COND_READY ? ALU_COND_RESULT :
+                         ALU_MNMX_READY ? ALU_MNMX_RESULT :
+                         0;
+    COMMIT_ALU_REGISTER := ALU_READY ? ALU_DESTREG :
+                         ALU_ADD_READY ? ALU_ADD_DESTREG :
+                         ALU_CSX_READY ? ALU_CSX_DESTREG :
+                         ALU_LOGIC_READY ? ALU_LOGIC_DESTREG :
+                         ALU_MUL_READY ? ALU_MUL_DESTREG :
+                         ALU_COND_READY ? ALU_COND_DESTREG :
+                         ALU_MNMX_READY ? ALU_MNMX_DESTREG :
+                         0;
 
     always {
         if( ALU_READY ) {
-            COMMIT_ALU_RESULT = ALU_RESULT;
-            COMMIT_ALU_REGISTER = ALU_DESTREG;
             ALU_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
         } else {
             if( ALU_ADD_READY ) {
-                COMMIT_ALU_RESULT = ALU_ADD_RESULT;
-                COMMIT_ALU_REGISTER = ALU_ADD_DESTREG;
                 ALU_ADD_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
             } else {
                 if( ALU_CSX_READY ) {
-                    COMMIT_ALU_RESULT = ALU_CSX_RESULT;
-                    COMMIT_ALU_REGISTER = ALU_CSX_DESTREG;
                     ALU_CSX_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
                 } else {
                     if( ALU_LOGIC_READY ) {
-                        COMMIT_ALU_RESULT = ALU_LOGIC_RESULT;
-                        COMMIT_ALU_REGISTER = ALU_LOGIC_DESTREG;
                         ALU_LOGIC_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
                     } else {
                         if( ALU_MUL_READY ) {
-                            COMMIT_ALU_RESULT = ALU_MUL_RESULT;
-                            COMMIT_ALU_REGISTER = ALU_MUL_DESTREG;
                             ALU_MUL_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
                         } else {
                             if( ALU_COND_READY ) {
-                                COMMIT_ALU_RESULT = ALU_COND_RESULT;
-                                COMMIT_ALU_REGISTER = ALU_COND_DESTREG;
                                 ALU_COND_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
                             } else {
-                                if( ALU_MNMX_READY ) {
-                                    COMMIT_ALU_RESULT = ALU_MNMX_RESULT;
-                                    COMMIT_ALU_REGISTER = ALU_MNMX_DESTREG;
-                                    ALU_MNMX_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
-                                }
+                                ALU_MNMX_ACK = ALU_MNMX_READY & COMMIT_EXECUTE_ALU_RESULT_ACK;
                             }
                         }
                     }

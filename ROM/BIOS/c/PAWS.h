@@ -48,8 +48,10 @@ unsigned short volatile *BACKGROUND_COPPER_CPUINPUT = (unsigned short volatile *
 unsigned char volatile *BACKGROUND_COPPER_PROGRAM = (unsigned char volatile *) 0xd00a;
 unsigned short volatile *BACKGROUND_COPPER_ADDRESS = (unsigned short volatile *) 0xd00c;
 unsigned int volatile *BACKGROUND_COPPER_OP = (unsigned int volatile *) 0xd010;
-unsigned char volatile *BACKGROUND_COPPER_MEMRESET = (unsigned char volatile *) 0xd016;
-unsigned short volatile *BACKGROUND_COPPER_MEMVINIT = (unsigned short volatile *) 0xd018;
+unsigned char volatile *BACKGROUND_COPPER_MEMADDR = (unsigned char volatile *) 0xd016;
+unsigned short volatile *BACKGROUND_COPPER_MEMVALUE = (unsigned short volatile *) 0xd018;
+unsigned short volatile *BACKGROUND_COPPER_CPUOUTPUT = (unsigned short volatile *) 0xd008;
+unsigned short volatile *BACKGROUND_MEMORY = (unsigned short volatile *) 0xd020;
 
 unsigned short volatile *TM_X = (unsigned short volatile *) 0xd100;
 unsigned short volatile *TM_Y = (unsigned short volatile *) 0xd108;
@@ -329,44 +331,6 @@ typedef struct {
 #define ACTIVE_CHANNEL_PCM 192
 
 #define AUDIO_OFF for( int channel = CHANNEL_LEFT_0; channel <= CHANNEL_RIGHT_2; channel++) beep_stop( channel )
-
-// NEW CU BACKGROUND CO-PROCESSOR
-// OPCODES
-#define CU_JMP 0
-#define CU_SET 1
-#define CU_ADD 2
-#define CU_SUB 3
-#define CU_AND 4
-#define CU_OR  5
-#define CU_XOR 6
-#define CU_SHL 7
-#define CU_SHR 8
-#define CU_SEQ 9
-#define CU_SNE 10
-#define CU_SLT 11
-#define CU_SLE 12
-#define CU_RND 13
-#define CU_LFM 14
-#define CU_STM 15
-
-// REGISTER NAMES { VBLANK, X, Y, CPU, R0, R1, R2, R3 }
-#define CU_RB 0
-#define CU_RX 1
-#define CU_RY 2
-#define CU_RC 3
-#define CU_R0 4
-#define CU_R1 5
-#define CU_R2 6
-#define CU_R3 7
-
-// BACKGROUND GENERATOR REGISTER NAMES { MODE, COLOUR, ALT COLOUR } REPLACE { VBLANK, X, Y } WHEN WRITING
-#define CU_BM 0
-#define CU_BC 1
-#define CU_BA 2
-
-// REG2 IS REG OR LITERAL
-#define CU_RR 0
-#define CU_RL 1
 
 // DMA(NEW) TRANSFER PROTOCOLS
 #define DMA_SET_TO_S    0x10

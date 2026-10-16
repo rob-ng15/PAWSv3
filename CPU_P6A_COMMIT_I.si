@@ -24,6 +24,7 @@ unit cpu_commit_i(
     input   uint64              COMMIT_CSRFPU_RESULT,                                                                           // CSR AND FPU EXECUTE RESULT
     input   uint5               COMMIT_CSRFPU_REGISTER,                                                                         // CSR AND FPU EXECUTE RESULT REGISTER
 
+
     input   uint1               EXECUTE_ALUDIVIDE_RESULT_READY,
     output  uint1               COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK,
     input   uint64              COMMIT_ALUDIVIDE_RESULT,                                                                        // ALU DIVISION EXECUTE RESULT
@@ -36,8 +37,23 @@ unit cpu_commit_i(
 
     output  uint32              COMMIT_RD                                                                                       // INSTRUCTION COMMIT IS WRITING TO { FLOAT, RD }
 ) <reginputs> {
+    uint5   ADDR <: EXECUTE_FASTBASE_RESULT_READY ? COMMIT_FASTBASE_REGISTER :
+                    EXECUTE_ALU_RESULT_READY ? COMMIT_ALU_REGISTER :
+                    EXECUTE_CSRFPU_RESULT_READY ? COMMIT_CSRFPU_REGISTER :
+                    EXECUTE_LSA_RESULT_READY ? COMMIT_LSA_REGISTER :
+                    EXECUTE_ALUDIVIDE_RESULT_READY ? COMMIT_ALUDIVIDE_REGISTER :
+                    0;
+    uint1   WENABLE <: |ADDR;
+    uint64  WDATA <: EXECUTE_FASTBASE_RESULT_READY ? COMMIT_FASTBASE_RESULT :
+                    EXECUTE_ALU_RESULT_READY ? COMMIT_ALU_RESULT :
+                    EXECUTE_CSRFPU_RESULT_READY ? COMMIT_CSRFPU_RESULT :
+                    EXECUTE_LSA_RESULT_READY ? COMMIT_LSA_RESULT :
+                    COMMIT_ALUDIVIDE_RESULT;
+
     $$for i=1,3 do
-    I$i$.wenable1 := 0;
+    I$i$.wenable1 := WENABLE;
+    I$i$.addr1 := ADDR;
+    I$i$.wdata1 := WDATA;
     $$end
 
     COMMIT_EXECUTE_ALU_RESULT_ACK := 0;
@@ -47,55 +63,21 @@ unit cpu_commit_i(
     COMMIT_EXECUTE_LSA_RESULT_ACK := 0;
 
     always {                                                                                                                    // ACCEPT RESULT AND COMMIT FROM EXECUTE STAGES
-        COMMIT_RD = 1 << (
-            EXECUTE_FASTBASE_RESULT_READY ? COMMIT_FASTBASE_REGISTER :
-            EXECUTE_ALU_RESULT_READY ? COMMIT_ALU_REGISTER :
-            EXECUTE_CSRFPU_RESULT_READY ? COMMIT_CSRFPU_REGISTER :
-            EXECUTE_LSA_RESULT_READY ? COMMIT_LSA_REGISTER :
-            EXECUTE_ALUDIVIDE_RESULT_READY ? COMMIT_ALUDIVIDE_REGISTER :
-            0
-        );
+        COMMIT_RD = WENABLE << ADDR;
 
-        if( EXECUTE_FASTBASE_RESULT_READY ) {                                                                            //  INTEGER ALU FOURTH HIGHEST PRIORITY
+        if( EXECUTE_FASTBASE_RESULT_READY ) {
             COMMIT_EXECUTE_FASTBASE_RESULT_ACK = 1;
-            $$for i=1,3 do
-            I$i$.addr1 = COMMIT_FASTBASE_REGISTER;
-            I$i$.wdata1 = COMMIT_FASTBASE_RESULT;
-            I$i$.wenable1 = |COMMIT_FASTBASE_REGISTER;
-            $$end
         } else {
-            if( EXECUTE_ALU_RESULT_READY ) {                                                                            //  INTEGER ALU FOURTH HIGHEST PRIORITY
+            if( EXECUTE_ALU_RESULT_READY ) {
                 COMMIT_EXECUTE_ALU_RESULT_ACK = 1;
-                $$for i=1,3 do
-                I$i$.addr1 = COMMIT_ALU_REGISTER;
-                I$i$.wdata1 = COMMIT_ALU_RESULT;
-                I$i$.wenable1 = |COMMIT_ALU_REGISTER;
-                $$end
             } else {
-                if( EXECUTE_CSRFPU_RESULT_READY  ) {                                                                            //  CSR AND FLOATING POINT THIRD HIGHEST PRIORITY
+                if( EXECUTE_CSRFPU_RESULT_READY  ) {
                     COMMIT_EXECUTE_CSRFPU_RESULT_ACK = 1;
-                    $$for i=1,3 do
-                    I$i$.addr1 = COMMIT_CSRFPU_REGISTER[0,5];
-                    I$i$.wdata1 = COMMIT_CSRFPU_RESULT;
-                    I$i$.wenable1 = |COMMIT_CSRFPU_REGISTER;
-                    $$end
                 } else {
-                    if( EXECUTE_LSA_RESULT_READY ) {                                                                              //  INTEGER DIVISION SECOND HIGHEST PRIORITY
+                    if( EXECUTE_LSA_RESULT_READY ) {
                         COMMIT_EXECUTE_LSA_RESULT_ACK = 1;
-                        $$for i=1,3 do
-                        I$i$.addr1 = COMMIT_LSA_REGISTER;
-                        I$i$.wdata1 = COMMIT_LSA_RESULT;
-                        I$i$.wenable1 = |COMMIT_LSA_REGISTER;
-                        $$end
                     } else {
-                        if( EXECUTE_ALUDIVIDE_RESULT_READY ) {                                                                              //  INTEGER DIVISION SECOND HIGHEST PRIORITY
-                            COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK = 1;
-                            $$for i=1,3 do
-                            I$i$.addr1 = COMMIT_ALUDIVIDE_REGISTER;
-                            I$i$.wdata1 = COMMIT_ALUDIVIDE_RESULT;
-                            I$i$.wenable1 = |COMMIT_ALUDIVIDE_REGISTER;
-                            $$end
-                        }
+                        COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK = EXECUTE_ALUDIVIDE_RESULT_READY;
                     }
                 }
             }

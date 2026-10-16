@@ -34,6 +34,7 @@ unit cpu_fetch(
     input   uint4               CSR_IRQ_VECTOR,
     output  uint1               CSR_IRQ_ACK,
     input   uint1               CSR_IRQ_ACK_ACK,
+    output  uint1               CSR_ECALL_REQ,
     output  uint$addr_width$    CSR_NEW_MEPC
 ) <reginputs> {
     uint$addr_width$    PC = uninitialised;
@@ -106,6 +107,8 @@ unit cpu_fetch(
 
     ICACHEW.invalidate := reset | CPU_FENCE;                                                                                    // INVALIDATE( after load ) CPU L1 CACHE FLAG
     ICACHEW.update := STATE[3,1] & ~ICACHE.tagmatch;
+
+    CSR_ECALL_REQ := 0;
 
     DECODE_ACK := 0;
 
@@ -194,24 +197,29 @@ unit cpu_fetch(
                         } else {
                             STATE = $STATE_FETCH_MULTI_2$;
                         }
+
+                        DECODE_ACK = 1;
                     } else {
                         DECODE_INSTRUCTION = THIS_INSTRUCTION;
                         switch( THIS_INSTRUCTION[2,5] ) {
                             case 5b11000 : {                                                                                        // BRANCH
                                 PC = BP_A.BP_ADDR;                                                                                  //  GET ADDRESSES FROM BRANCH PREDICTION
-                                STATE = $STATE_FETCH_NEXT$;                                                                         //  PASS BRANCH INSTRUCTION TO DECODE PIPELINE STAGE
+                                STATE = $STATE_FETCH_NEXT$; DECODE_ACK = 1;                                                                         //  PASS BRANCH INSTRUCTION TO DECODE PIPELINE STAGE
                             }
-                            case 5b11001 : { STATE = $STATE_FETCH_WAIT_JUMP$; }                                                     // JALR
+                            case 5b11001 : { STATE = $STATE_FETCH_WAIT_JUMP$; DECODE_ACK = 1; }                                                     // JALR
                             case 5b11011 : {                                                                                        // JAL ( NO REGISTERS USED )
                                 PC = JA;                                                                                            //  GO TO JAL ADDRESS
                                 STATE = $STATE_FETCH_NEXT$;                                                                         //  PASS TO DECODE PIPELINE STAGE TO HAVE RETURN ADDRESS SAVED
+                                DECODE_ACK = 1;
                             }
-                            case 5b11100 : { PC = NEXT_PC; STATE = FETCH_CSR.STATE; DECODE_ACK = FETCH_CSR.DECODE_ACK; }            // CSR ONLY PASS TO DECODE STAGE IF NOT ECALL WFI
-                            default: { PC = NEXT_PC; STATE = $STATE_FETCH_NEXT$; }                                                  // PASS ALL OTHER INSTRUCTIONS TO DECODE PIPELINE STAGE
+                            case 5b11100 : {                                                                                        // CSR ONLY PASS TO DECODE STAGE IF NOT ECALL WFI
+                                PC = ( FETCH_CSR.STATE == $STATE_FETCH_ECALL$ ) ? PC : NEXT_PC;
+                                STATE = FETCH_CSR.STATE; DECODE_ACK = FETCH_CSR.DECODE_ACK;
+                                DECODE_ACK = FETCH_CSR.DECODE_ACK;
+                            }
+                            default: { PC = NEXT_PC; STATE = $STATE_FETCH_NEXT$; DECODE_ACK = 1; }                                                  // PASS ALL OTHER INSTRUCTIONS TO DECODE PIPELINE STAGE
                         }
                     }
-
-                    DECODE_ACK = 1;
                 }
             }
 
@@ -229,13 +237,21 @@ unit cpu_fetch(
             }
             case 7: { if( ~CSR_IRQ_PENDING ) { STATE = $STATE_FETCH_NEXT$; } }                                                  // STATE_FETCH_WAIT_IRQ_STARTED
 
-            case 8: { if( CSR_IRQ_PENDING ) { STATE = $STATE_FETCH_IRQ_START$; } }                                              // STATE_FETCH_WFI ( HALT-CATCH-FIRE IF INTERRUPTS NOT ENABLED )
+            case 8: { if( CSR_IRQ_PENDING & ~|BRANCH_PENDING ) { STATE = $STATE_FETCH_IRQ_START$; } }                           // STATE_FETCH_WFI ( HALT-CATCH-FIRE IF INTERRUPTS NOT ENABLED )
 
-            case 9: { STATE = $STATE_FETCH_NEXT$; }                                                                             // STATE_FETCH_ECALL ( not yet implemented )
+            case 9: {                                                                                                           // STATE_FETCH_ECALL
+                if( ~|BRANCH_PENDING ) {
+                    CSR_ECALL_REQ = 1;
+
+                    if( CSR_IRQ_PENDING ) {
+                        STATE = $STATE_FETCH_IRQ_START$;
+                    }
+                }
+            }
 
             case 10: { if( ~MEM_BUSY_FETCH ) { STATE = $STATE_FETCH_NEXT$; } }                                                  // STATE_FETCH_FLUSH ( WAIT FOR MEMORY TO NOT BE BUSY )
 
-            case 11: { MULTI_STEP = 1; STATE = $STATE_FETCH_DECODE$; }                                                                          // STATE_FETCH_MULTI_2 ( SEND BACK TO DECODE STAGE )
+            case 11: { MULTI_STEP = 1; STATE = $STATE_FETCH_DECODE$; }                                                          // STATE_FETCH_MULTI_2 ( SEND BACK TO DECODE STAGE )
         }
 
         BRANCH_PENDING = BP_FLUSH ? 0 : BRANCH_PENDING - BP_TAKEN + ( IS_BRANCH & DECODE_ACK );                                 // TRACK BRANCH INSTRUCTIONS IN THE PIPELINE
@@ -641,14 +657,14 @@ unit custom_convert(
             switch( INSTRUCTION[27,5] ) {
                 default: {}
                 case 5b00000: {                                                                                                 // TH.ADDSL -> SHxADD
-                    CNV_INSTRUCTION = { 7b0010000, INSTRUCTION[20,5], INSTRUCTION[15,5], INSTRUCTION[25,2], 1b0, INSTRUCTION[7,5], 7b0111011 };
+                    CNV_INSTRUCTION = { 7b0010000, INSTRUCTION[20,5], INSTRUCTION[15,5], INSTRUCTION[25,2], 1b0, INSTRUCTION[7,5], 7b0110011 };
                 }
                 case 5b00010: {                                                                                                 // TH.SRRI -> RORI TH.SRRIW -> RORIW
                     CNV_INSTRUCTION = INSTRUCTION[26,1] ? { 7b0110000, INSTRUCTION[20,5], INSTRUCTION[15,5], 3b101, INSTRUCTION[7,5], 7b0011011 } :
                                                           {  6b011000, INSTRUCTION[20,6], INSTRUCTION[15,5], 3b101, INSTRUCTION[7,5], 7b0010011 };
                 }
                 case 5b10000: {                                                                                                 // TH.REV -> REV8 TH.TSTNBZ
-                    if( ~|INSTRUCTION[25,2] ) {
+                    if( INSTRUCTION[25,2] == 2b01 ) {
                         CNV_INSTRUCTION = { 12b011010111000, INSTRUCTION[15,5], 3b101, INSTRUCTION[7,5], 7b0010011 };
                     }
                 }

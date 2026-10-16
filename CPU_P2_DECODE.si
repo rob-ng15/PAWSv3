@@ -427,7 +427,7 @@ unit cpu_instruction_flags(
                 switch( Rtype( INSTRUCTION ).f3 ) {
                     default: {
                         if( ( INSTRUCTION[27,5] == 5b00100 ) | ( INSTRUCTION[27,5] == 5b00101 ) ) {
-                            FLAGS = ( |INSTRUCTION[26,2] ? $IS_ALUSIGNX$ : 0 ) | $IS_CUSTOM | IS_ALUFAST | IS_ALU | IS_WR$;     //      SIGN EXTENSION FOR MAC W AND H VARIATIONS
+                            FLAGS = ( INSTRUCTION[26,1] ? $IS_ALUSIGNX$ : 0 ) | $IS_CUSTOM | IS_ALUFAST | IS_ALU | IS_WR$;     //      SIGN EXTENSION FOR MAC W AND H VARIATIONS
                         }
                     }
                     case 3b100: { FLAGS = $IS_CUSTOM | IS_LOAD | IS_WR$; }

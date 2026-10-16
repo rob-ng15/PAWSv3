@@ -294,7 +294,7 @@ unit dma_setcopy_rectangle_flags(
     ACCESSSIZE := mode_set ?                        ( $DEST32$ & $COUNT32$ & $DESTADD32$ ) ? 2b10 :
                                                     ( $DEST16$ & $COUNT16$ & $DESTADD16$ ) ? 2b01 :
                                                                                              2b00 :
-                             ( $SRC16$ & $DEST32$ & $COUNT32$ & $SRCADD32$ & $DESTADD32$ ) ? 2b10 :
+                             ( $SRC32$ & $DEST32$ & $COUNT32$ & $SRCADD32$ & $DESTADD32$ ) ? 2b10 :
                              ( $SRC16$ & $DEST16$ & $COUNT16$ & $SRCADD16$ & $DESTADD16$ ) ? 2b01 :
                                                                                              2b00;
 }

@@ -20,7 +20,7 @@ $$ print("CSR Counter Width: "..CWIDTH.." bits")
 
 // ON CPU INSTRUCTION CACHE DEFINITIONS
 // L1 CACHE SIZE
-$$ L1Iblocks = 4096
+$$ L1Iblocks = 2048
 $$ L1Icount = clog2(L1Iblocks)
 $$ L1Ipartaddresswidth = addr_width - 1 - L1Icount
 $$ L1Ipartaddressstart = 1 + L1Icount
@@ -53,9 +53,9 @@ $$ print("BP BLOCKS: "..BPsize.." WIDTH: "..BPaddrwidth.." TAG SIZE: "..BPpartad
 // NUCUmem must be at least 8, which can be set by the CPU before NUCU program starts
 $$ NUCUblocks = 1024
 $$ NUCUaddr = clog2(NUCUblocks)
-$$ NUCUmem = 8
+$$ NUCUmem = 64
 $$ NUCUmemaddr = clog2(NUCUmem)
-$$ NUCUstack = 8
+$$ NUCUstack = 16
 $$ NUCUstackaddr = clog2(NUCUstack)
 $$ print('BACKGROUND COPPER CONFIGURATION')
 $$ print("Program Blocks: "..NUCUblocks.." Memory Slots: "..NUCUmem.." Stack Entries: "..NUCUstack)
@@ -100,6 +100,16 @@ $include('../common/clean_reset.si')
 $include('../definitions.si')
 $include('../circuitry.si')
 
+// SELECT INTEGER DIVISION AND FLOATING-POINT DIVISION AND SQUAREROOT UNITS
+// TRADE OFF OF SPEED AND BUILD COMPLEXITY
+// CHOICES ARE  dointegerdivide dointegerdivide_radix4 dointegerdivide_radix8
+//              do_float_divide do_float_divide_radix4 do_float_divide_radix8
+//              do_float_sqrt do_float_sqrt_radix4 do_float_sqrt_radix8
+
+$$ INT_DIVIDE = "dointegerdivide_radix8"
+$$ FP_DIVIDE = "do_float_divide_radix8"
+$$ FP_SQRT = "do_float_sqrt_radix8"
+
 // CPU
 $$CPUISA = 0x4001102F
 $include('../CPU_P0_TOP.si')
@@ -110,7 +120,9 @@ $include('../CPU_P4A_AGU.si')
 $include('../CPU_P4B_DISPATCH.si')
 $include('../CPU_P5_EXECUTE_ALU_PIPELINE.si')
 $include('../CPU_P5_EXECUTE_ALUDIVISION_PIPELINE.si')
-$include('../CPU_P5_EXECUTE_CSRFPU.si')
+$include('../CPU_P5_UNIT_CSR.si')
+$include('../CPU_P5_UNIT_FPU.si')
+$include('../CPU_P5_EXECUTE_CSRFPU_PIPELINE.si')
 $include('../CPU_P5_EXECUTE_FASTBASE_PIPELINE.si')
 $include('../CPU_P5_EXECUTE_LSA.si')
 $include('../CPU_P6A_COMMIT_I.si')

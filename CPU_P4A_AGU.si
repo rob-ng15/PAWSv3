@@ -170,9 +170,9 @@ unit cpu_agu(
     always {
         onehot( STATE ) {
             case 0: {
+                AGU_RD = AGU_ACK <<  { $AG_IS_WR_F$, $AG_IS_WR$ ? Rtype( AGU_INSTRUCTION ).rd : 5b00000 };
                 if( AGU_ACK ) {                                                                                                 // WAIT FOR REGISTERS TO ACKNOWLEDGE INSTRUCTION IS READY
                     AGU_READY = 0;                                                                                              //  HALT REGISTERS SENDING MORE INSTRUCTIONS
-                    AGU_RD[ { $AG_IS_WR_F$, $AG_IS_WR$ ? Rtype( AGU_INSTRUCTION ).rd : 5b00000 }, 1 ] = 1;                              //  FLAG RD FOR CONTENTION
 
                     if( $AG_IS_BRANCH$ ) {
                         STATE = 2;
@@ -198,8 +198,6 @@ unit cpu_agu(
                         }
                     }
 
-                } else {
-                    AGU_RD = 0;
                 }
             }
 
@@ -259,10 +257,10 @@ unit branch_predict_write(
         2b00,                                                                                                                   // PRED_TABLE ==    101     TAKE_BRANCH = 0
         2b01,                                                                                                                   // PRED_TABLE ==    110     TAKE_BRANCH = 0
         2b10,                                                                                                                   // PRED_TABLE ==    111     TAKE_BRANCH = 0
-        2b01,                                                                                                                   // PRED_TABLE ==    000     TAKE_BRANCH = 1
-        2b01,                                                                                                                   // PRED_TABLE ==    001     TAKE_BRANCH = 1
-        2b01,                                                                                                                   // PRED_TABLE ==    010     TAKE_BRANCH = 1
-        2b01,                                                                                                                   // PRED_TABLE ==    011     TAKE_BRANCH = 1
+        2b10,                                                                                                                   // PRED_TABLE ==    000     TAKE_BRANCH = 1
+        2b10,                                                                                                                   // PRED_TABLE ==    001     TAKE_BRANCH = 1
+        2b10,                                                                                                                   // PRED_TABLE ==    010     TAKE_BRANCH = 1
+        2b10,                                                                                                                   // PRED_TABLE ==    011     TAKE_BRANCH = 1
         2b01,                                                                                                                   // PRED_TABLE ==    100     TAKE_BRANCH = 1
         2b10,                                                                                                                   // PRED_TABLE ==    101     TAKE_BRANCH = 1
         2b11,                                                                                                                   // PRED_TABLE ==    110     TAKE_BRANCH = 1

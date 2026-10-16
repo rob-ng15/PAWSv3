@@ -135,7 +135,7 @@ void reset_system( void ) {
     for( int i = 0; i < 4; i++ ) {
         tm_cs( i );
     }
-    for( int i = 0; i < 63; i++ ) SPRITE_ACTIVE[i] = 0;
+    for( int i = 0; i < 64; i++ ) SPRITE_ACTIVE[i] = 0;
 }
 
 void timer_interrupt( void ) {
@@ -164,7 +164,7 @@ void vblank_interrupt( void ) {
     tilemap_scroll( 3, 3, 1 );
     update_sprite( 0, 0, 1, 0, 0 ); update_sprite( 2, 0, 1, 0, 0 );
     set_sprite_attribute( 0, 1, ( ( j & 192 ) >> 6 ) );
-    set_sprite_attribute( 2, 1, ( j & 128 ) >> 7 );
+    set_sprite_attribute( 2, 1, 4 + ( ( j & 128 ) >> 7 ) );
     j++;
 }
 
@@ -201,8 +201,8 @@ complex mapPoint(int width,int height,float radius,int x,int y,float scale){
     complex c;
     int l = (width<height)?width:height;
 
-    c.x = 2*radius*(x - width/2.0)/scale;
-    c.y = 2*radius*(y - height/2.0)/scale;
+    c.x = 2.0f*radius*(x - width/2.0f)/scale;
+    c.y = 2.0f*radius*(y - height/2.0f)/scale;
 
     return c;
 }
@@ -226,14 +226,14 @@ void juliaSet(int width,int height,int y_start, complex c,float radius,int n,flo
 }
 
 void julia( void ) {
-    complex c; c.x = -0.7; c.y = 0.27015;
+    complex c; c.x = -0.7f; c.y = 0.27015f;
     juliaSet( 320, 100, 122, c, 4, 64, 720 );
 }
 
 void mandel( void ) {
     const int graphwidth = 320, graphheight = 100;
-    float kt = 63, m = 4.0;
-    float xmin = -2.1, xmax = 0.6, ymin = -1.35, ymax = 1.35;
+    float kt = 63.0f, m = 4.0f;
+    float xmin = -2.1f, xmax = 0.6f, ymin = -1.35f, ymax = 1.35f;
     float dx = (xmax - xmin) / graphwidth, dy = (ymax - ymin) / graphheight;
     float jx, jy, tx, ty, wx, wy, r;
     int k;
@@ -243,10 +243,10 @@ void mandel( void ) {
         jy = ymin + y * dy;
         for( int x = 0; x < graphwidth; x++ ) {
             jx = xmin + x * dx;
-            k = 0; wx = 0.0; wy = 0.0;
+            k = 0; wx = 0.0f; wy = 0.0f;
             do {
                 tx = wx * wx - wy * wy + jx;
-                ty = 2.0 * wx * wy + jy;
+                ty = 2.0f * wx * wy + jy;
                 wx = tx;
                 wy = ty;
                 r = wx * wx + wy * wy;
@@ -296,8 +296,8 @@ void main( void ) {
     gpu_triangle( WHITE, 300, 0, 310, 10, 305, 30 );
 
     // SET THE SPRITES
-    set_sprite_bitmaps( 0, &pacman_bitmap[0] ); set_sprite( 0, 1, 0, 440, 4, 13 );
-    set_sprite_bitmaps( 1, &ghost_bitmap[0] ); set_sprite( 2, 1, 64, 440, 0, 8);
+    set_sprite_bitmaps( 0, &pacman_bitmap[0], 1024 ); set_sprite( 0, 1, 0, 440, 0, 8 );
+    set_sprite_bitmaps( 4, &ghost_bitmap[0], 512 ); set_sprite( 2, 1, 64, 440, 4, 8 );
 
     // COLOUR BARS ON THE TILEMAP - SCROLL WITH INTERRUPT - SET VIA DMA 5 SINGLE SOURCE TO SINGLE DESTINATION
     for( i = 0; i < 63; i++ ) {

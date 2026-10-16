@@ -1,7 +1,7 @@
 #ifndef __PAWSLIBRARY__
 #include <stddef.h>
-#include "PAWSintrinsics.h"
-#include "PAWSdefinitions.h"
+#include <PAWSintrinsics.h>
+#include <PAWSdefinitions.h>
 
 // MEMORY
 extern unsigned char *MEMORYTOP;
@@ -95,11 +95,15 @@ extern void status_lights( unsigned char display, unsigned char background );
 extern void set_background( unsigned char, unsigned char, unsigned char );
 extern void copper_startstop( unsigned char ) ;
 extern void copper_program( unsigned short address, unsigned char command, unsigned char reg1, unsigned char flag, unsigned short reg2 );
-extern void copper_set_memory( unsigned short *memory );
+extern void copper_assemble( unsigned short address, char *assembly );
+extern void copper_assemble_output( unsigned short address, char *assembly );
+extern void copper_assemble_comment( unsigned short address, char *assembly, char *comment );
+extern void copper_init_memory( unsigned short *memory, unsigned int number );
 extern void set_copper_cpuinput( unsigned short );
 extern unsigned short get_copper_cpuoutput( void );
 extern void copper_memwrite( unsigned short value, unsigned short cell );
 extern unsigned short copper_memread( unsigned short cell );
+extern int __copper_assemble_debug;
 
 // TILEMAP
 extern void tm_cs( unsigned char tm_layer );
@@ -130,7 +134,7 @@ extern void gpu_cs( void );
 extern void gpu_line( unsigned char, short, short, short, short );
 extern void gpu_wideline( unsigned char, short, short, short, short, unsigned char );
 extern void gpu_circle( unsigned char, short, short, short, unsigned char, unsigned char );
-extern void gpu_ellipse( unsigned char colour, short xc, short yc, short radius_x, short radius_y, int filled );
+extern void gpu_ellipse( unsigned char colour, short xc, short yc, short radius_x, short radius_y, unsigned char filled );
 extern void gpu_blit( unsigned char, short, short, short, unsigned char, unsigned char );
 extern void gpu_character_blit( unsigned char, short, short, unsigned short, unsigned char, unsigned char );
 extern void gpu_character_blit_shadow( unsigned char, unsigned char, short, short, unsigned char, unsigned char, unsigned char );
@@ -189,9 +193,9 @@ extern void update_sprite( unsigned char sprite_number, unsigned char kill, shor
 extern void update_sprite_compat( unsigned char sprite_number, unsigned short updateflag );
 extern unsigned long get_sprite_collision( unsigned char sprite_number );
 extern unsigned short get_sprite_layer_collision( unsigned char sprite_number );
-extern void set_sprite_bitmaps( unsigned char sprite_number, unsigned char *sprite_bitmaps );
-extern void set_sprite_bitamps_from_spritesheet( unsigned char sprite_number, unsigned char count, unsigned char *sprite_bitmaps, unsigned char mode );
-extern void set_sprite_bitamps_from_spritesheet32x32( unsigned char sprite_number, unsigned char *sprite_bitmaps );
+extern void set_sprite_bitmaps( unsigned char tile_number, unsigned char *sprite_bitmaps, unsigned int bytes );
+extern void set_sprite_bitamps_from_spritesheet( unsigned char tile_number, unsigned char count, unsigned char *sprite_bitmaps, unsigned char mode );
+extern void set_sprite_bitamps_from_spritesheet32x32( unsigned char tile_number, unsigned char *sprite_bitmaps );
 extern unsigned short volatile *SPRITE_ACTIVE;
 extern unsigned short volatile *SPRITE_ACTIONS;
 extern unsigned short volatile *SPRITE_TILE;

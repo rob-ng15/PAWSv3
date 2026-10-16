@@ -40,9 +40,9 @@ unsigned short volatile *BACKGROUND_COPPER_CPUINPUT = (unsigned short volatile *
 unsigned char volatile *BACKGROUND_COPPER_PROGRAM = (unsigned char volatile *) 0xd00a;
 unsigned short volatile *BACKGROUND_COPPER_ADDRESS = (unsigned short volatile *) 0xd00c;
 unsigned int volatile *BACKGROUND_COPPER_OP = (unsigned int volatile *) 0xd010;
-unsigned char volatile *BACKGROUND_COPPER_MEMRESET = (unsigned char volatile *) 0xd016;
-unsigned short volatile *BACKGROUND_COPPER_MEMVINIT = (unsigned short volatile *) 0xd018;
-unsigned short volatile *BACKGROUND_COPPER_CPUOUTPUT = (unsigned short volatile *) 0xd000;
+unsigned char volatile *BACKGROUND_COPPER_MEMADDR = (unsigned char volatile *) 0xd016;
+unsigned short volatile *BACKGROUND_COPPER_MEMVALUE = (unsigned short volatile *) 0xd018;
+unsigned short volatile *BACKGROUND_COPPER_CPUOUTPUT = (unsigned short volatile *) 0xd008;
 unsigned short volatile *BACKGROUND_MEMORY = (unsigned short volatile *) 0xd020;
 
 unsigned short volatile *TM_X = (unsigned short volatile *) 0xd100;

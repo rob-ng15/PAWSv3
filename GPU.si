@@ -181,6 +181,9 @@ unit gpu(
     circle GPUcircle(                                                                                                           // GPU OUTLINE/FILLED CIRCLE
         x <: gpu_x, y <: gpu_y, radius <: gpu_param0, sectormask <: gpu_param1
     );
+    drawellipse GPUellipse(                                                                                                     // GPU FILLED/OUTLINE ELLIPSE
+        xc <: gpu_x, yc <: gpu_y, radius_x <: gpu_param0, radius_y <: gpu_param1
+    );
     triangle GPUtriangle(                                                                                                       // GPU FILLED TRIANGLE ( used x2 for quadrilateral )
         crop_left <: crop_left, crop_right <: crop_right, crop_top <: crop_top, crop_bottom <: crop_bottom,
         x <: gpu_x, y <: gpu_y, x1 <: gpu_param0, y1 <: gpu_param1, x2 <: gpu_param2, y2 <: gpu_param3
@@ -202,12 +205,12 @@ unit gpu(
     );
 
     // GPU UNIT BUSY FLAGS
-    uint6   gpu_busy_flags <:: { GPUpixelblock.busy, |GPUblit.busy, GPUtriangle.busy, GPUcircle.busy, GPUrectangle.busy, GPUline.busy };
+    uint7   gpu_busy_flags <:: { GPUellipse.busy, GPUpixelblock.busy, |GPUblit.busy, GPUtriangle.busy, GPUcircle.busy, GPUrectangle.busy, GPUline.busy };
     uint1   gpu_busy <:: |gpu_busy_flags;
 
-    GPUrectangle.start := 0; GPUline.start := 0; GPUcircle.start := 0; GPUtriangle.start := 0; GPUblit.start := 0; GPUpixelblock.start := 0;
+    GPUrectangle.start := 0; GPUline.start := 0; GPUcircle.start := 0; GPUellipse.start := 0; GPUtriangle.start := 0; GPUblit.start := 0; GPUpixelblock.start := 0;
 
-    bitmap_write := ( gpu_write == 1 ) | GPUline.bitmap_write | GPUrectangle.bitmap_write | GPUcircle.bitmap_write | GPUtriangle.bitmap_write | GPUblit.bitmap_write |
+    bitmap_write := ( gpu_write == 1 ) | GPUline.bitmap_write | GPUrectangle.bitmap_write | GPUcircle.bitmap_write | GPUellipse.bitmap_write | GPUtriangle.bitmap_write | GPUblit.bitmap_write |
                                          GPUpixelblock.bitmap_write;
     gpu_active := ( |gpu_write[1,3] ) | gpu_busy;
 
@@ -217,7 +220,7 @@ unit gpu(
                 if( |gpu_write ) {                                                                                              // START GPU DRAWING UNIT FROM QUEUE ENTRY
                     gpu_active_dithermode = 0;                                                                                  // RESET TO THE COMMON DEFAULTS
                     bitmap_colour_write = gpu_colour; bitmap_colour_write_alt = gpu_colour_alt;
-                    GPUcircle.filledcircle = gpu_write[0,1]; GPUblit.tilecharacter = gpu_write[0,1];
+                    GPUcircle.filledcircle = gpu_write[0,1]; GPUellipse.filled = gpu_write[0,1]; GPUblit.tilecharacter = gpu_write[0,1];
 
                     switch( gpu_write ) {
                         default: {}
@@ -232,8 +235,8 @@ unit gpu(
                         case 8: { GPUblit.start = 1; }                                                                          // BLIT 8 x 8 CHARACTER PARAM0 TO (X,Y) as 8 x 8
                         case 9: { GPUblit.start = 2; }                                                                          // BLIT 16 x 16 COLOUR TILE PARAM0 TO (X,Y) as 16 x 16
                         case 10: { GPUpixelblock.start = 1; }                                                                   // START THE PIXELBLOCK AT (x,y)  WIDTH P0, IGNORE COLOUR P1
-                        // 11 PLACE HOLDER                                                                                      // DRAW FILLED ELLIPSE CENTE (X,Y) RADII (P0,P1)
-                        // 12 PLACE HOLDER                                                                                      // DRAW ELLIPSE CENTE (X,Y) RADII (P0,P1)
+                        case 11: { gpu_active_dithermode = gpu_dithermode; GPUellipse.start = 1; }                              // DRAW FILLED ELLIPSE CENTE (X,Y) RADII (P0,P1)
+                        case 12: { GPUellipse.start = 1; }                                                                      // DRAW ELLIPSE CENTE (X,Y) RADII (P0,P1)
                         // 13
                         // 14                                                                                                   // QUEUE CONTROLLED QUADRILATERAL, TRIANGLE 2
                         // 15                                                                                                   // QUEUE CONTROLLED QUADRILATERAL, TRIANGLE 1
@@ -256,6 +259,7 @@ unit gpu(
                             ( bitmap_x_write, bitmap_y_write ) = copycoordinates( GPUpixelblock.bitmap_x_write, GPUpixelblock.bitmap_y_write );
                             bitmap_colour_write = GPUpixelblock.bitmap_colour_write;
                         }
+                        case 6: { ( bitmap_x_write, bitmap_y_write ) = copycoordinates( GPUellipse.bitmap_x_write, GPUellipse.bitmap_y_write ); }
                     }
                 } else {
                     STATE = $STATE_QUEUE_DISPATCH$;
@@ -762,6 +766,170 @@ unit circle(
     );
 
     busy := start | CIRCLE.busy;
+}
+
+// ELLIPSE - OUTPUT PIXELS TO DRAW AN OUTLINE OR FILLED ELLIPSE
+unit drawellipse(
+    input   uint1   start,
+    output  uint1   busy,
+    input   int10   xc,
+    input   int10   yc,
+    input   int10   radius_x,
+    input   int10   radius_y,
+    input   uint1   filled,
+    output  int10   bitmap_x_write,
+    output  int10   bitmap_y_write,
+    output  uint1   bitmap_write
+) <reginputs> {
+    uint8               STATE = 1;
+                        $$ STATE_ELLIPSE_WAIT = 1
+                        $$ STATE_ELLIPSE_INIT = 2
+                        $$ STATE_ELLIPSE_INIT2 = 4
+                        $$ STATE_ELLIPSE_REGION1_EVAL = 8
+                        $$ STATE_ELLIPSE_REGION1_PLOT = 16
+                        $$ STATE_ELLIPSE_REGION2_SETUP = 32
+                        $$ STATE_ELLIPSE_REGION2_EVAL = 64
+                        $$ STATE_ELLIPSE_REGION2_PLOT = 128
+
+    int10               rx32 <:: radius_x;
+    int10               ry32 <:: radius_y;
+
+    int27               Asquare2 = uninitialised;
+    int27               Bsquare2 = uninitialised;
+    int10               active_x = uninitialised;
+    int10               active_y = uninitialised;
+    int27               Xchange = uninitialised;
+    int27               Ychange = uninitialised;
+    int27               ellipseERROR = uninitialised;
+    int27               Xstop = uninitialised;
+    int27               Ystop = uninitialised;
+
+    int10               fill_y = uninitialised;
+    uint2               plot_idx = uninitialised;
+
+    int10               plot_X <:: xc + ( plot_idx[0,1] ? -active_x : active_x );
+    int10               plot_Y <:: yc + ( plot_idx[1,1] ? -fill_y : fill_y );
+
+    // COMBINATIONAL EVALUATIONS TO AVOID DOUBLE ASSIGNMENTS IN SAME STATE
+    int27               next_eE_r1 <:: ellipseERROR + Ychange;
+    uint1               cond_r1    <:: ( ( next_eE_r1 << 1 ) + Xchange ) > 0;
+
+    int27               next_eE_r2 <:: ellipseERROR + Xchange;
+    uint1               cond_r2    <:: ( ( next_eE_r2 << 1 ) + Ychange ) > 0;
+
+    bitmap_x_write := plot_X;
+    bitmap_y_write := plot_Y;
+    bitmap_write := STATE[4,1] | STATE[7,1];
+
+    always {
+        onehot( STATE ) {
+            case 0: {                                                                                                   // STATE_ELLIPSE_WAIT
+                busy = start;
+                if( start ) {
+                    if( ( radius_x == 0 ) | ( radius_y == 0 ) ) {
+                        busy = 0;
+                    } else {
+                        STATE = $STATE_ELLIPSE_INIT$;
+                    }
+                }
+            }
+            case 1: {                                                                                                   // STATE_ELLIPSE_INIT
+                Asquare2 = rx32 * rx32;
+                Bsquare2 = ry32 * ry32;
+                STATE = $STATE_ELLIPSE_INIT2$;
+            }
+            case 2: {                                                                                                   // STATE_ELLIPSE_INIT2
+                Xchange = Bsquare2 * ( 1 - ( rx32 << 1 ) );
+                Ychange = Asquare2;
+                Xstop = ( Bsquare2 << 1 ) * rx32;
+                Ystop = 0;
+                Asquare2 = Asquare2 << 1;
+                Bsquare2 = Bsquare2 << 1;
+                active_x = radius_x;
+                active_y = 0;
+                ellipseERROR = 0;
+                STATE = $STATE_ELLIPSE_REGION1_EVAL$;
+            }
+            case 3: {                                                                                                   // STATE_ELLIPSE_REGION1_EVAL
+                if( Xstop >= Ystop ) {
+                    fill_y = filled ? 0 : active_y;
+                    plot_idx = 0;
+                    STATE = $STATE_ELLIPSE_REGION1_PLOT$;
+                } else {
+                    STATE = $STATE_ELLIPSE_REGION2_SETUP$;
+                }
+            }
+            case 4: {                                                                                                   // STATE_ELLIPSE_REGION1_PLOT
+                if( plot_idx == 3 ) {
+                    if( fill_y != active_y ) {
+                        fill_y = fill_y + 1;
+                        plot_idx = 0;
+                    } else {
+                        active_y = active_y + 1;
+                        Ystop = Ystop + Asquare2;
+                        Ychange = Ychange + Asquare2;
+
+                        active_x = cond_r1 ? active_x - 1 : active_x;
+                        Xstop = cond_r1 ? Xstop - Bsquare2 : Xstop;
+                        Xchange = cond_r1 ? Xchange + Bsquare2 : Xchange;
+
+                        // Because this runs concurrently on the clock edge, Xchange here uses the OLD pre-updated value, exactly matching the C code logic.
+                        ellipseERROR = cond_r1 ? next_eE_r1 + Xchange : next_eE_r1;
+
+                        STATE = $STATE_ELLIPSE_REGION1_EVAL$;
+                    }
+                } else {
+                    plot_idx = plot_idx + 1;
+                }
+            }
+            case 5: {                                                                                                   // STATE_ELLIPSE_REGION2_SETUP
+                Xchange = Bsquare2 >> 1;
+                Ychange = ( Asquare2 >> 1 ) * ( 1 - ( ry32 << 1 ) );
+                Ystop = Asquare2 * ry32;
+                Xstop = 0;
+                active_x = 0;
+                active_y = radius_y;
+                ellipseERROR = 0;
+                STATE = $STATE_ELLIPSE_REGION2_EVAL$;
+            }
+            case 6: {                                                                                                   // STATE_ELLIPSE_REGION2_EVAL
+                if( Xstop <= Ystop ) {
+                    fill_y = filled ? 0 : active_y;
+                    plot_idx = 0;
+                    STATE = $STATE_ELLIPSE_REGION2_PLOT$;
+                } else {
+                    busy = 0;
+                    STATE = $STATE_ELLIPSE_WAIT$;
+                }
+            }
+            case 7: {                                                                                                   // STATE_ELLIPSE_REGION2_PLOT
+                if( plot_idx == 3 ) {
+                    if( fill_y != active_y ) {
+                        fill_y = fill_y + 1;
+                        plot_idx = 0;
+                    } else {
+                        active_x = active_x + 1;
+                        Xstop = Xstop + Bsquare2;
+                        Xchange = Xchange + Bsquare2;
+
+                        active_y = cond_r2 ? active_y - 1 : active_y;
+                        Ystop = cond_r2 ? Ystop - Asquare2 : Ystop;
+                        Ychange = cond_r2 ? Ychange + Asquare2 : Ychange;
+                        ellipseERROR = cond_r2 ? next_eE_r2 + Ychange : next_eE_r2;
+
+                        STATE = $STATE_ELLIPSE_REGION2_EVAL$;
+                    }
+                } else {
+                    plot_idx = plot_idx + 1;
+                }
+            }
+        }
+
+        if( reset ) {
+            STATE = $STATE_ELLIPSE_WAIT$;
+            busy = 0;
+        }
+    }
 }
 
 // TRIANGLE - OUTPUT PIXELS TO DRAW A FILLED TRIANGLE

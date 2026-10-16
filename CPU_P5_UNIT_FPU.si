@@ -1,0 +1,1354 @@
+// Rob Shelton ( @robng15 Twitter, @rob-ng15 GitHub )
+// Simple 16/32/64 bit FPU calculation/conversion routines
+// Designed for as small as FPGA usage as possible,
+// not for speed.
+//
+// Copyright (c) 2021 Rob Shelton
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+// Donated to Silice by @sylefeb
+// MIT license, see LICENSE_MIT in Silice repo root
+//
+// NB: dsh represents the precision of the flaoting-point inputs single == 00, double == 01, half == 10
+//     as per the Risc-V FUNCTION7[0,2] bits
+// NB: All calculations and conversions expect to receive repackaged floating-point inputs.
+//     Half and Single precision floating-point numbers are expanded to fit into the bitfields
+//     of double precision numbers. Repackers are provided to expand/truncate inputs/RESULTs
+//     with nan-boxing of half and single precision numbers.
+// NB: All calculations return their RESULTs in the bitfields of double precision numbers.
+//     These are repackaged in the CPU floating-point controller to their actual format.
+// NB: The floating-point exponent bias is generated in the CPU floating-point controller
+//     and passed to those operations which require it.
+// NB: rm represents the rounding mode, RTE(000) RTZ(001) RDN(010) RUP(011) RMM(100) are supported.
+// NB: The F1_TYPE/F_2_TYPE/F_3_TYPE inputs detect exception inputs for each of the input registers,
+//     and are 4 bits each for { infinity, signalling NAN, quiet NAN, ZERO } and will signal a
+//     NAN if a half or single precision input is not nan-boxed.
+// NB: subnormal inputs are presently detected and treated as zero.
+// NB: Error states are those required by Risc-V floating point
+
+// FLOATING-POINT SINGLE CYCLE UNITS
+unit floatclass(                                                                                                                // CLASSIFY FLOATING POINT INPUT ( FCLASS.S FCLASS.D )
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint1   sign1F,                                                                                                     // SIGN OF FLOATING-POINT REGISTER
+    input   uint5   F1_TYPE,                                                                                                   // { INF sNAN qNAN ZERO } OF REGISTER INPUT
+    output  uint10  FCLASS                                                                                                      // 10 bit INTEGER CLASSIFICATION OF REGISTER INPUT
+) <reginputs> {
+    FCLASS := {
+        F1_TYPE[1,1],                                                                                                          // 512  qNAN
+        F1_TYPE[2,1],                                                                                                          // 256  sNAN
+        F1_TYPE[3,1] & ~sign1F,                                                                                                // 128  +INF
+        ~|F1_TYPE & ~sign1F,                                                                                                   // 64   +NORMAL
+        F1_TYPE[0,1] & ~sign1F & ~F1_TYPE[4,1],                                                                               // 32   +SUBNORMAL
+        F1_TYPE[0,1] & ~sign1F & F1_TYPE[4,1],                                                                                // 16   +0
+        F1_TYPE[0,1] & sign1F & F1_TYPE[4,1],                                                                                 // 8    -0
+        F1_TYPE[0,1] & sign1F & ~F1_TYPE[4,1],                                                                                // 4    -SUBNORMAL
+        ~|F1_TYPE & sign1F,                                                                                                    // 2    -NORMAL
+        F1_TYPE[3,1] & sign1F                                                                                                  // 1    -INF
+    };
+}
+
+unit floateqltle(                                                                                                               // FLOATING POINT COMPARISONS ( uses less/equal generator )
+    input   uint3   FUNCTION3,                                                                                                  // COMPARISON TYPE SWITCH
+    input   uint1   EQUAL,                                                                                                      // IS EQUAL FLAG A == B
+    input   uint1   LESS,                                                                                                       // IS LESS FLAG A < B
+    input   uint1   sNANa,                                                                                                      // A is sNAN?
+    input   uint1   sNANb,                                                                                                      // B is sNAN?
+    input   uint1   F1_OR_F2_NAN,                                                                                               // EITHER A OR B NAN?
+    output  uint1   COMPARE,                                                                                                    // RESULT OF COMPARISON
+    output  uint5   flags                                                                                                       // FLOATING POINT FLAGS FOR COMPARISON
+) <reginputs> {
+    uint3               LTEQ <:: { EQUAL, LESS, LESS | EQUAL };                                                                 // BIT ARRAY FOR COMPARISON FLAGS
+
+    COMPARE := ~F1_OR_F2_NAN & LTEQ[ FUNCTION3, 1 ];                                                                            // 0 IF NAN ELSE COMPARISON FLAG
+    flags := { FUNCTION3[2,1] ? 1b0 : FUNCTION3[1,1] ? ( sNANa | sNANb ) : F1_OR_F2_NAN, 4b0000 };                              // RETURN NV FLAG IF FLT OR FLE AND NAN IS AN INPUT
+}
+
+unit floatminmax(                                                                                                               // FLOATING POINT MIN / MAX
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint2   FUNCTION3,                                                                                                  // MIN == 0, MAX == 1
+    input   uint64  F1_X,                                                                                                      // REGISTER INPUT A
+    input   uint64  F_2_X,                                                                                                      // REGISTER INPUT B
+    input   uint4   F1_TYPE,                                                                                                   // { INF sNAN qNAN ZERO } OF INPUT FLOAT REGISTER 1
+    input   uint4   F_2_TYPE,                                                                                                   // { INF sNAN qNAN ZERO } OF INPUT FLOAT REGISTER 2
+    input   uint1   F1_OR_F2_NAN,                                                                                               // EITHER A OR B NAN?
+    input   uint1   LESS,                                                                                                       // IS LESS FLAG A < B
+    output  uint64  MINMAX,                                                                                                     // RESULT OF MIN/MAX(a,b)
+    output  uint5   flags                                                                                                       // FLOATING POINT FLAGS FOR MIN/MAX
+) <reginputs> {
+    repackage_actual DOMINMAX( dsh <: dsh, repack :> MINMAX );
+
+    DOMINMAX.a :=                                         F1_OR_F2_NAN ? FUNCTION3[1,1] ? 64h7FF8000000000000 :                 // FMINM FMAXM ANY NAN -> NAN
+                  ( F1_TYPE[2,1] | F_2_TYPE[2,1] ) | ( F1_TYPE[1,1] & F_2_TYPE[1,1] ) ? 64h7FF8000000000000 :                 // FMIN FMAX sNAN or BOTH qNAN -> NAN
+                                                                          F1_TYPE[1,1] ? F_2_X : F1_X :                       //  A == NAN -> B, B == NAN -> A
+                                                              ( FUNCTION3[0,1] ^ LESS ) ? F1_X : F_2_X;                        //  ELSE MIN/MAX AND SELECT REGISTER
+
+    flags := { F1_OR_F2_NAN, 4b0000 };                                                                                          // FLAGS SIGNALLING NAN INPUT
+}
+
+unit floatsign(                                                                                                                 // FLOATING POINT FSGNJ FSGNJN FSGNJX SIGN INJECTION
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint2   FUNCTION3,                                                                                                  // SWITCH FSGNJ == 00, FSGNJN == 01, FSGNJX == 10
+    input   uint64  F1_X,                                                                                                      // REGISTER INPUT 1
+    input   uint1   sign2F,                                                                                                     // SIGN OF REGISTER INPUT 2
+    output  uint64  SIGN                                                                                                        // RESULT OF SIGN INJECTION
+) <reginputs> {
+    make_actual SIGNINJ(
+        dsh <: dsh,
+        exp <: fp64( F1_X ).exponent,
+        fraction <: fp64( F1_X ).fraction,
+        repack :> SIGN
+    );
+
+    SIGNINJ.sign := ( FUNCTION3[1,1] ? fp64( F1_X ).sign : FUNCTION3[0,1] ) ^ sign2F;                                          // DETERMINE SIGN FOR INJECTION ^ FOR JX, ~ FOR JN = FOR J
+}
+
+unit floatimmediate(                                                                                                            // FLOATING-POINT IMMEDIATE TABLE LOOKUP
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint5   RS1,
+    output  uint64  immediate
+) <reginputs> {
+    brom uint14 immediate_rom[96] = {
+                                                                                                                                // { 1b sign, 8b exponent, 2b msb of mantissa }
+        11b10111111100,                                                                                                         // -1.0
+        11b00000000100,                                                                                                         // minimum positive normal
+        11b00110111100,                                                                                                         // 1 x 2^-16
+        11b00111000000,                                                                                                         // 1 x 2^-15
+        11b00111011100,                                                                                                         // 1 x 2^-8
+        11b00111100000,                                                                                                         // 1 x 2^-7
+        11b00111101100,                                                                                                         // 0.0625
+        11b00111110000,                                                                                                         // 0.125
+        11b00111110100,                                                                                                         // 0.25
+        11b00111110101,                                                                                                         // 0.3125
+        11b00111110110,                                                                                                         // 0.375
+        11b00111110111,                                                                                                         // 0.4375
+        11b00111111000,                                                                                                         // 0.5
+        11b00111111001,                                                                                                         // 0.625
+        11b00111111010,                                                                                                         // 0.75
+        11b00111111011,                                                                                                         // 0.875
+        11b00111111100,                                                                                                         // 1.0
+        11b00111111101,                                                                                                         // 1.25
+        11b00111111110,                                                                                                         // 1.5
+        11b00111111111,                                                                                                         // 1.75
+        11b01000000000,                                                                                                         // 2.0
+        11b01000000001,                                                                                                         // 2.5
+        11b01000000010,                                                                                                         // 3.0
+        11b01000000100,                                                                                                         // 4.0
+        11b01000001000,                                                                                                         // 8.0
+        11b01000001100,                                                                                                         // 16.0
+        11b01000011000,                                                                                                         // 128 2^7
+        11b01000011100,                                                                                                         // 256 2^8
+        11b01000111000,                                                                                                         // 2^15
+        11b01000111100,                                                                                                         // 2^16
+        11b01111111100,                                                                                                         // +INF
+        11b01111111110,                                                                                                         // NaN
+
+                                                                                                                                // { 1b sign, 11b exponent, 2b msb of mantissa }
+        14b10111111111100,                                                                                                      // -1.0
+        14b00000000000100,                                                                                                      // minimum positive normal
+        14b00111110111100,                                                                                                      // 1 x 2^-16
+        14b00111111000000,                                                                                                      // 1 x 2^-15
+        14b00111111011100,                                                                                                      // 1 x 2^-8
+        14b00111111100000,                                                                                                      // 1 x 2^-7
+        14b00111111101100,                                                                                                      // 0.0625
+        14b00111111110000,                                                                                                      // 0.125
+        14b00111111110100,                                                                                                      // 0.25
+        14b00111111110101,                                                                                                      // 0.3125
+        14b00111111110110,                                                                                                      // 0.375
+        14b00111111110111,                                                                                                      // 0.4375
+        14b00111111111000,                                                                                                      // 0.5
+        14b00111111111001,                                                                                                      // 0.625
+        14b00111111111010,                                                                                                      // 0.75
+        14b00111111111011,                                                                                                      // 0.875
+        14b00111111111100,                                                                                                      // 1.0
+        14b00111111111101,                                                                                                      // 1.25
+        14b00111111111110,                                                                                                      // 1.5
+        14b00111111111111,                                                                                                      // 1.75
+        14b01000000000000,                                                                                                      // 2.0
+        14b01000000000001,                                                                                                      // 2.5
+        14b01000000000010,                                                                                                      // 3.0
+        14b01000000000100,                                                                                                      // 4.0
+        14b01000000001000,                                                                                                      // 8.0
+        14b01000000001100,                                                                                                      // 16.0
+        14b01000000011000,                                                                                                      // 128 2^7
+        14b01000000011100,                                                                                                      // 256 2^8
+        14b01000000111000,                                                                                                      // 2^15
+        14b01000000111100,                                                                                                      // 2^16
+        14b01111111111100,                                                                                                      // +INF
+        14b01111111111110,                                                                                                      // NaN
+
+                                                                                                                                // { 1b sign, 5b exponent, 2b msb of mantissa }
+        8b10111100,                                                                                                             // -1.0
+        8b00000100,                                                                                                             // minimum positive normal
+        8b00000000,                                                                                                             // 1 x 2^-16 ( subnormal -> 0 )
+        8b00000000,                                                                                                             // 1 x 2^-15 ( subnormal -> 0 )
+        8b00011100,                                                                                                             // 1 x 2^-8
+        8b00100000,                                                                                                             // 1 x 2^-7
+        8b00101100,                                                                                                             // 0.0625
+        8b00110000,                                                                                                             // 0.125
+        8b00110100,                                                                                                             // 0.25
+        8b00110101,                                                                                                             // 0.3125
+        8b00110110,                                                                                                             // 0.375
+        8b00110111,                                                                                                             // 0.4375
+        8b00111000,                                                                                                             // 0.5
+        8b00111001,                                                                                                             // 0.625
+        8b00111010,                                                                                                             // 0.75
+        8b00111011,                                                                                                             // 0.875
+        8b00111100,                                                                                                             // 1.0
+        8b00111101,                                                                                                             // 1.25
+        8b00111110,                                                                                                             // 1.5
+        8b00111111,                                                                                                             // 1.75
+        8b01000000,                                                                                                             // 2.0
+        8b01000001,                                                                                                             // 2.5
+        8b01000010,                                                                                                             // 3.0
+        8b01000100,                                                                                                             // 4.0
+        8b01001000,                                                                                                             // 8.0
+        8b01001100,                                                                                                             // 16.0
+        8b01011000,                                                                                                             // 128 2^7
+        8b01100100,                                                                                                             // 256 2^8
+        8b01111000,                                                                                                             // 2^15
+        8b01111100,                                                                                                             // +INF
+        8b01111100,                                                                                                             // +INF
+        8b01111110                                                                                                              // NaN
+    };
+
+    immediate_rom.addr := { dsh, RS1 };                                                                                         // SELECT IMMEDIATE VALUE
+
+    immediate := dsh[0,1] ? {                                                                                                   // EXTRACT DOUBLE IMMEDIATE
+                                immediate_rom.rdata[13, 1],
+                                immediate_rom.rdata[ 2,11],
+                                immediate_rom.rdata[ 0, 2],
+                                50h0
+                            } :
+                 dsh[1,1] ? {                                                                                                   // EXTRACT HALF PRECISION IMMEDIATE
+                                48hffffffffffff,                                                                                //  NAN BOXED
+                                immediate_rom.rdata[ 7, 1],
+                                immediate_rom.rdata[ 2, 5],
+                                immediate_rom.rdata[ 0, 2],
+                                8h0
+                            } :
+                            {                                                                                                   // EXTRACT SINGLE PRECISION IMMEDIATE
+                                32hffffffff,                                                                                    //  NAN BOXED
+                                immediate_rom.rdata[10, 1],
+                                immediate_rom.rdata[ 2, 8],
+                                immediate_rom.rdata[ 0, 2],
+                                21h0
+                            };
+}
+
+// IDENTIFY { zero fraction, infinity, signalling NAN, quiet NAN, ZERO } CHECKS FOR NAN-BOXING OF FLOAT
+unit typeF(
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF
+    input   uint64  a,                                                                                                          // REGISTER VALUE TO CHECK
+    output  uint5   type                                                                                                        // { ZF INF sNAN qNAN ZERO } OF INPUT REGISTER
+) <reginputs> {
+    uint1               ZF <:: ~|( dsh[0,1] ? fp64(a).fraction : dsh[1,1] ? fp16(a).fraction : fp32(a).fraction );              // FRACTION == 0
+    uint1               expFF <:: &( dsh[0,1] ? fp64(a).exponent : dsh[1,1] ? fp16(a).exponent : fp32(a).exponent );            // CHECK FOR EXP == ALL 1s ( signals INF/NAN )
+    uint1               exp00 <:: ~|( dsh[0,1] ? fp64(a).exponent : dsh[1,1] ? fp16(a).exponent : fp32(a).exponent );           // CHECK FOR EXP == ALL 0s ( signals ZERO/SUBNORMAL )
+    uint6               MSB[4] = { 22, 51, 9, -1 };                                                                             // POSITION OF THE MSB OF THE FRACTION
+
+    type := dsh[0,1] | ( ~dsh[0,1] & &( dsh[1,1] ? a[16,48] : a[32,32] ) ) ? {                                                  // IF DOUBLE, OR NAN-boxed SINGLE/HALF, SPECIFY TYPE
+                                                                                ZF,
+                                                                                expFF & ZF,                                     // INF
+                                                                                expFF & ~fp64(a).fraction[MSB[dsh],1] & ~ZF,    // sNAN
+                                                                                expFF & fp64(a).fraction[MSB[dsh],1],           // qNAN
+                                                                                exp00                                           // ZERO / SUBNORMAL
+                                                                             } : 5b00010;                                       // SINGLE/HALF NOT BOXED, ISSUE qNAN
+}
+
+unit floatcases(
+    input   uint4   class1F,
+    input   uint4   class2F,
+    output  uint1   F1_OR_F2_INF,
+    output  uint1   F1_AND_F2_INF,
+    output  uint1   F1_OR_F2_NAN,
+    output  uint1   F1_OR_F2_ZERO,
+    output  uint1   F1_AND_F2_ZERO
+) <reginputs> {
+    F1_OR_F2_INF := class1F[3,1] | class2F[3,1]; F1_AND_F2_INF := class1F[3,1] & class2F[3,1];                                  // A AND/OR B INF?
+    F1_OR_F2_NAN := |( class1F[1,2] | class2F[1,2] );                                                                           // A OR B NAN?
+    F1_OR_F2_ZERO := class1F[0,1] | class2F[0,1]; F1_AND_F2_ZERO := class1F[0,1] & class2F[0,1];                                // A AND/OR B ZERO
+}
+
+// EXECPTION RETURN VALUES signed infinity, signalling NAN, quiet NAN, signed zero
+// RETURN VALUES IN _wide repacked format
+unit wide_special(
+    input   uint1   sign,
+    output  uint64  xINF,
+    output  uint64  sNAN,
+    output  uint64  qNAN,
+    output  uint64  xZERO
+) <reginputs> {
+    xINF :=  { sign, 63h7FF0000000000000 };
+    sNAN :=          64h7FF4000000000000;
+    qNAN :=          64h7FF8000000000000;
+    xZERO := { sign, 63h0 };
+}
+unit wide_xINF(
+    input   uint1   sign,
+    output  uint64  value
+) <reginputs> {
+    value := { sign, 63h7FF0000000000000 };
+}
+unit wide_xZERO(
+    input   uint1   sign,
+    output  uint64  value
+) <reginputs> {
+    value := { sign, 63h0 };
+}
+
+// EXECPTION RETURN VALUES signed infinity, signalling NAN, quiet NAN, signed zero
+// RETURN VALUES IN _actual format
+unit actual_special(
+    input   uint2   dsh,
+    input   uint1   sign,
+    output  uint64  xINF,
+    output  uint64  sNAN,
+    output  uint64  qNAN,
+    output  uint64  xZERO
+) <reginputs> {
+    xINF :=  dsh[0,1] ? { sign, 63h7FF0000000000000 } : dsh[1,1] ? { 48hffffffffffff, sign, 15h7C00 } : { 32hffffffff, sign, 31h7f800000 };
+    sNAN :=  dsh[0,1] ?           64h7FF4000000000000 : dsh[1,1] ?                64hffffffffffff7d00 :                64hffffffff7fa00000;
+    qNAN :=  dsh[0,1] ?           64h7FF8000000000000 : dsh[1,1] ?                64hffffffffffff7e00 :                64hffffffff7fc00000;
+    xZERO := dsh[0,1] ? { sign,                63h0 } : dsh[1,1] ? { 48hffffffffffff, sign,    15b0 } : { 32hffffffff, sign,        31h0 };
+}
+unit actual_qNAN(
+    input   uint2   dsh,
+    output  uint64  value
+) <reginputs> {
+    value := dsh[0,1] ? 64h7FF8000000000000 : dsh[1,1] ? 64hffffffffffff7e00 : 64hffffffff7fc00000;
+}
+unit actual_xZERO(
+    input   uint2   dsh,
+    input   uint1   sign,
+    output  uint64  value
+) <reginputs> {
+    value := dsh[0,1] ? { sign, 63h0 } : dsh[1,1] ? { 48hffffffffffff, sign, 15b0 } : { 32hffffffff, sign, 31h0 };
+}
+
+// REPACKERS, ALL FLOATING POINT NUMBERS ARE PASSED TO CALCULATIONS IN THE BITFIELD OF A DOUBLE TO ALLOW EASIER EXTRACTION OF THE SIGN, EXPONENT AND FRACTIONS
+// _WIDE, copies double to double, single/half to the bitfields of a double
+// _ACTUAL, copies double to double, a repacked wide single/half to the bitfields of a single/half
+unit repackage_actual(                                                                                                          // REPACKAGE A DOUBLE/SINGLE/HALF FROM THE BITFIELDS OF A DOUBLE
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint64  a,                                                                                                          // FLOATING POINT SOURCE REGISTER
+    output  uint64  repack                                                                                                      // REPACKED FLOATING POINT REGISTER
+) <reginputs> {
+    repack := dsh[0,1] ? a :                                                                                                    // RETURN DOUBLE UNCHANGED
+              dsh[1,1] ? { 48hffffffffffff, fp64( a ).sign, fp64( a ).exponent[0,5], fp64( a ).fraction[42,10] } :              // RETURN HALF REPACKED ( NANboxed )
+                         {     32hffffffff, fp64( a ).sign, fp64( a ).exponent[0,8], fp64( a ).fraction[29,23] };               // RETURN SINGLE REPACKED ( NANboxed )
+}
+unit repackage_wide(                                                                                                            // REPACKAGE A DOUBLE/SINGLE/HALF INTO THE BITFIELDS OF A DOUBLE
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint64  a,                                                                                                          // FLOATING POINT SOURCE REGISTER
+    output  uint64  repack                                                                                                      // REPACKED FLOATING POINT REGISTER
+) <reginputs> {
+    repack := dsh[0,1] ? a :                                                                                                    // RETURN DOUBLE UNCHANGED
+              dsh[1,1] ? { fp16( a ).sign, 6b0, fp16( a ).exponent, fp16( a ).fraction, 42b0 } :                                // RETURN HALF REPACKED
+                         { fp32( a ).sign, 3b0, fp32( a ).exponent, fp32( a ).fraction, 29b0 };                                 // RETURN SINGLE REPACKED
+}
+
+unit make_wide(                                                                                                                 // REPACKAGE A DOUBLE/SINGLE/HALF INTO THE BITFIELDS OF A DOUBLE
+    input   uint1   sign,                                                                                                       // SIGN
+    input   uint11  exp,                                                                                                        // EXPONENT
+    input   uint52  fraction,                                                                                                   // FRACTION
+    output  uint64  wide                                                                                                        // PACKED INTO DOUBLE BITFIELDS
+) <reginputs> {
+    wide := { sign, exp, fraction };                                                                                            // PACK SIGN, EXPONENT AND FRACTION INTO DOUBLE BITFIELDS
+}
+
+unit make_actual(                                                                                                               // REPACKAGE A DOUBLE/SINGLE/HALF FROM THE BITFIELDS OF A DOUBLE
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint1   sign,                                                                                                       // SIGN
+    input   uint11  exp,                                                                                                        // EXPONENT
+    input   uint52  fraction,                                                                                                   // FRACTION
+    output  uint64  repack                                                                                                      // REPACKED FLOATING POINT REGISTER
+) <reginputs> {
+    repack := dsh[0,1] ? { sign, exp, fraction } :                                                                              // RETURN DOUBLE UNCHANGED
+              dsh[1,1] ? { 48hffffffffffff, sign, exp[0,5], fraction[42,10] } :                                                 // RETURN HALF REPACKED ( NANboxed )
+                         {     32hffffffff, sign, exp[0,8], fraction[29,23] };                                                  // RETURN SINGLE REPACKED ( NANboxed )
+}
+
+// NORMALISE A 106 BIT MANTISSA SO THAT THE MSB IS ONE, FOR ADDSUB ALSO DECREMENT THE EXPONENT FOR EACH SHIFT LEFT
+// EXTRACT THE 53 BITS FOLLOWING THE MSB (1.xxxx) FOR ROUNDING
+unit clz106(
+    input   uint106  bitstream,
+    output  uint7   count
+) <reginputs> {
+    uint3               mask <:: { |bitstream[104,2], |bitstream[96,8], |bitstream[64,32] };                                    // FLAG PARTS THAT CONTAIN A 1 { [104,2], [96,8], [64,32] }
+
+    always {
+        uint2   clz_3 = uninitialised;
+        uint4   clz_2 = uninitialised;
+        uint6   clz_1 = uninitialised;
+        uint7   clz_0 = uninitialised;
+
+        ( clz_3 ) =  clz_silice_2( bitstream[104, 2] );                                                                         // CLZ FOR BITS 104 - 105
+        ( clz_2 ) =  clz_silice_8( bitstream[ 96, 8] );                                                                         // CLZ FOR BITS  96 - 103
+        ( clz_1 ) = clz_silice_32( bitstream[ 64,32] );                                                                         // CLZ FOR BITS  64 -  95
+        ( clz_0 ) = clz_silice_64( bitstream[  0,64] );                                                                         // CLZ FOR BITS   0 -  63
+
+        count = ( mask[2,1] ? clz_3 : mask[1,1] ? clz_2 : mask[0,1] ? clz_1 : clz_0 ) +                                         // COUNT LEADING ZEROS FOR NORMALISATION SHIFT
+                ( mask[2,1] ?     0 : mask[1,1] ?     2 : mask[0,1] ?    10 :    42 );                                          // ADD ON AMOUNT IN PRIOR SECTIONS IF APPLICABLE
+    }
+}
+unit donormalexp(
+    input   int13   exp,                                                                                                        // EXPONENT FROM ADDITION / SUBTRACTION
+    input   uint106 bitstream,                                                                                                  // RESULT FROM CALCULATION
+    output  int13   newexponent,                                                                                                // ADJUSTED EXPONENT FOR ADDITION / SUBTRACTION
+    output  uint53  normalfraction                                                                                              // NORMALISED FRACTION 1.xxx
+) <reginputs> {
+    uint106             temporary <:: ( bitstream << CLZ.count );                                                               // SHIFT FRACTION LEFT SO 1.xxxx
+    clz106 CLZ( bitstream <: bitstream );                                                                                       // COUNT LEADING ZEROS
+
+    normalfraction := temporary[ 52, 53 ];                                                                                      // EXTRACT 53 BITS ( 1 extra for rounding )
+    newexponent := exp - CLZ.count;                                                                                             // ADDSUB EXPONENT ADJUSTMENT
+}
+
+// ROUND 52 ( double ) 23 ( single ) 11 ( half ) BIT FRACTION FROM NORMALISED FRACTION USING NEXT TRAILING BIT
+// ADD BIAS TO EXPONENT AND ADJUST EXPONENT IF ROUNDING FORCES
+// COMBINE COMPONENTS TO FLOATING POINT NUMBER IN DOUBLE BITFIELDS  - USED BY CALCULATIONS
+// UNDERFLOW return 0, OVERFLOW return infinity
+unit doroundcombine(
+    input   uint2   rm,                                                                                                         // ROUNDING MODE ( RNE OR RTZ SUPPORTED )
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint10  BIAS,                                                                                                       // FLOATING POINT BIAS FOR DESTINATION DOUBLE/SINGLE/HALF
+    input   uint1   sign,                                                                                                       // RESULT SIGN
+    input   uint53  bitstream,                                                                                                  // NORMALISED BITSTREAM 1.xxxx
+    input   int13   exponent,                                                                                                   // EXPONENT ( no bias )
+    output  uint1   OF,                                                                                                         // OVERFLOW FLAG
+    output  uint1   UF,                                                                                                         // UNDERFLOW FLAG
+    output  uint64  combined                                                                                                    // COMBIUNED DOUBLE/SINGLE/HALF ROUNDED AND COMBINED
+) <reginputs> {
+    uint1               RM_ACTION <:: ( rm == $RNE$ ) ? 1 :                                                                     // RNE
+                                      ( rm == $RTZ$ ) ? 0 :                                                                     // RTZ
+                                      ( rm == $RDN$ ) ? sign :                                                                  // RDN
+                                                       ~sign;                                                                   // RUP
+
+    uint6               RB[4] = { 29, 0, 42, -1 };                                                                              // POSITION OF THE ROUNDING BIT IN BITSTREAM
+    uint53              roundedfraction <:: bitstream[1,52] + ( ( bitstream[RB[dsh],1] & RM_ACTION ) << RB[dsh] );              // EXTRACT 52 BITS AND + ROUNDING BIT ( 53 bits to detect overflow )
+    int13               newexponent <:: BIAS + exponent + roundedfraction[52,1];                                                // CREATE EXPONENT BY ADDING BIAS AND OVERFLOW
+    uint1               expOF <:: __signed( newexponent ) > __signed( { 2b0, BIAS, 1b0 } );                                     // OVERFLOW IF EXPONENT IS GREATER THAN ( 2 * BIAS )
+    make_wide COMBINED( sign <: sign, exp <: newexponent[0,11], fraction <: roundedfraction[0,52] );                            // MAKE COMBINED RESULT IN DOUBLE BITFIELDS
+    wide_xINF xINF( sign <: sign ); wide_xZERO xZERO( sign <: sign );                                                           // SIGNED INFINITY RETURN VALUE, SIGNED ZERO RETURN VALUE
+
+    OF := expOF;
+    UF := newexponent[12,1];                                                                                                    // UNDERFLOW IF EXPONENT IS STILL NEGATIVE AFTER BIAS ADDED
+    combined := newexponent[12,1] ? xZERO.value :                                                                               // UNDERFLOW RETURN SIGNED ZERO
+                            expOF ? xINF.value :                                                                                //  OVERFLOW RETTURN SIGNED INFINITY
+                                    COMBINED.wide;                                                                              //  ELSE COMBINED
+}
+
+// CONVERSIONS TO HANDLE FCVT.dest.source
+unit clz64(
+    input   uint64  number,
+    output  uint64  shift,
+    output  uint7   zeros
+) <reginputs> {
+    always {
+        ( zeros ) = clz_silice_64( number );
+        shift = number << zeros;
+    }
+}
+unit intlong2float(                                                                                                             // 32/64 BIT INTEGER TO 16/32/64 BIT FLOATING POINT
+    input   uint2   RMODE,                                                                                                      // ROUNDING MODE
+    input   uint1   dounsigned,                                                                                                 // UNSIGNED CONVERSION FLAG
+    input   uint1   il,                                                                                                         // FROM INTEGER == 0 OR LONG == 1
+    input   uint2   dsh,                                                                                                        // TO DOUBLE == 01 SINGLE == 00 HALF == 10
+    input   uint10  BIAS,                                                                                                       // BIAS FOR DOUBLE/SINGLE/HALF
+    input   uint6   MB,                                                                                                         // POSITION OFF THE ROUNDING BIT IN THE FRACTIONAL PART
+    input   uint64  I1,                                                                                                        // REGISTER VALUE TO CONVERT
+    input   uint32  I1_ABS32,                                                                                                  // 32 bit ABSOLUTE VALUE
+    input   uint64  I1_ABS64,                                                                                                  // 64 bit ABSOLUTE VALUE
+    output  uint64  RESULT,                                                                                                     // RESULTING DOUBLE/SINGLE/HALF
+    output  uint1   OP_FPUFLAGS                                                                                                 // FPU FLAG
+) <reginputs> {
+    uint1               sign <:: ~dounsigned & I1[ { il, 5b11111 }, 1 ];                                                       // EXTRACT SIGN IF SIGNED CONVERSION
+
+    uint1               RM_ACTION <:: ( RMODE == $RNE$ ) ? 1 :                                                                  // RNE
+                                      ( RMODE == $RTZ$ ) ? 0 :                                                                  // RTZ
+                                      ( RMODE == $RDN$ ) ? sign :                                                               // RDN
+                                                          ~sign;                                                                // RUP
+
+    uint64              number <:: il ? sign ? I1_ABS64 : I1 : sign ? I1_ABS32 : I1[0,32];                                  // EXTRACT ABSOLUTE VALUE
+    clz64 CLZ( number <: number );                                                                                              // COUNT LEADING ZEROS
+
+    uint6               RB[4] = { 39, 10, 52, -1 };                                                                             // POSITION OF THE ROUNDING BIT
+    uint53              roundedfraction <:: CLZ.shift[11,52] + ( ( CLZ.shift[RB[dsh],1] & RM_ACTION ) << MB );                  // GENERATE ROUNDED FRACTION, EXTRACT 52 BITS ADD ROUNDING MASK
+    uint11              exponent <:: 63 + BIAS - CLZ.zeros + roundedfraction[52,1];                                             // GENERATE EXPONENT AND ADD BIAS + 63 - CLZ + OVERFLOW
+    make_actual TOFLOAT(                                                                                                        // PACKAGE COMPONENTS INTO FLOATING-POINT BITFIELDS ( NAN BOXED )
+        dsh <: dsh,
+        sign <: sign, exp <: exponent[0,11], fraction <: roundedfraction[0,52]
+    );
+    actual_special SPECIAL( dsh <: dsh );                                                                                       // INF/ZERO RETURN VALUE FOR DOUBLE/SINGLE/HALF
+
+    uint6               IX[4] = { 40, 11, 53, -1 };                                                                             // MAXIMUM NUMBER OF FRACTION BITS
+    uint1               zlt <:: ( __unsigned( CLZ.zeros )  < __unsigned( IX[dsh] ) );                                           // CHECK IF INEXACT, TOO MANY BITS
+    uint1               HALF_OF <:: dsh[1,1] & ( __unsigned ( il ? I1_ABS64 : I1_ABS32 ) > __unsigned( 65504 ) );             // DETECT OVERFLOW IF HALF PRECISION
+
+    RESULT :=  ~|( il ? I1 : I1[0,32] ) ? SPECIAL.xZERO :                                                                     // RETURN ZERO
+                                  HALF_OF ? SPECIAL.xINF :                                                                      //  OR HALF OVERFLOW -> +/- INFINITY
+                                            TOFLOAT.repack;                                                                     //  OR FLOATING-POINT CONVERSION
+    OP_FPUFLAGS := dsh[0,1] ? ( il ? zlt : 0 ) : zlt;                                                                           // FLAGS NOT EXACT, TOO MANY BITS
+}
+
+unit float2intlong(                                                                                                             // 16/32/64 BIT FLOATING POINT TO 32/64 BIT INTEGER
+    input   uint1   RM_ACTION,                                                                                                  // ROUNDING MODE BIT MASK
+    input   uint1   dounsigned,                                                                                                 // UNSIGNED CONVERSION FLAG
+    input   uint1   domod,                                                                                                      // FCVTMOD.W.D FLAG
+    input   uint1   il,                                                                                                         // TO INTEGER == 0 OR LONG == 1
+    input   uint10  BIAS,                                                                                                       // BIAS FOR DOUBLE/SINGLE/HALF
+    input   uint64  F1_X,                                                                                                      // REGISTER VALUE TO CONVERT ( repacke into double bitfields )
+    input   uint4   F1_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } OF INPUT REGISTER
+    input   int13   EXP,                                                                                                        // EXPONENT WITH BIAS REMOVED
+    output  uint64  RESULT,                                                                                                     // RESULTING LONG OR INTEGER
+    output  uint5   OP_FPUFLAGS                                                                                                 // FPU FLAGS
+) <reginputs> {
+    uint1               NV <:: ( __signed( EXP ) > __signed( { 1b0, il, 4b1111, dounsigned } ) ) |                              // INVALID IF TOO LARGE
+                               ( dounsigned & fp64( F1_X ).sign );                                                             //  OR UNSIGNED AND NEGATIVE
+    uint65              fraction <:: { 1b1, fp64( F1_X ).fraction, 12b0 } >> ( 63 - EXP );                                     // EXTRACT FRACTION AND EXTEND TO 65 BITS, SHIFT INTO POSITION
+    uint64              unsignedfraction <:: ( il ? fraction[1,64] : fraction[1,32] ) + ( fraction[0,1] & RM_ACTION );          // GENERATE ROUNDED 32/64 bit ABSOLUTE INTEGER
+    uint64              neg_64 <:: -unsignedfraction;
+    uint32              neg_32 <:: -unsignedfraction[0,32];
+    uint64              min <:: il ? dounsigned ?                   0 : 64h8000000000000000 : 64hffffffff80000000;              // MINIMUM NEGATIVE INTEGER OR 0 FOR UNSIGNED
+    uint64              max <:: il ? dounsigned ? 64hffffffffffffffff : 64h7fffffffffffffff : 64h000000007fffffff;              // MAXIMUM POSITIVE INTEGER
+
+    OP_FPUFLAGS := { NV, 4b0000 };                                                                                              // RETURN FLAGS
+
+    RESULT :=      F1_TYPE[0,1] | ~|unsignedfraction ? 0 :                                                                     // 0 INPUT ( OR INTEGER BECOMES ZERO )
+                                       |F1_TYPE[1,2] ? max :                                                                   // NAN INPUT
+                                        F1_TYPE[3,1] ? fp64( F1_X ).sign ? min : max :                                        // INF INPUT
+                                      dounsigned ? NV ? { {64{~fp64( F1_X ).sign}} } : unsignedfraction :                      // 0 OR MAX IF NV ELSE RETURN UNSIGNED FRACTION
+                                                   NV ? fp64( F1_X ).sign ? min : max :                                        // MIN/MAX FOR SIGNED OUT OF RANGE
+                                                   il ? fp64( F1_X ).sign ? neg_64 : unsignedfraction :                        // RETURN CORRECTLY SIGNED RESULT
+                                                domod ? fp64( F1_X ).sign ? { 32hffffffff, neg_64[0,32] } :                    // FCVTMOD.W.D, ONLY USE 32 BITS AND SIGN EXTEND
+                                                                             { {32{unsignedfraction[31,1]}}, unsignedfraction[0,32] } :
+                                   fp64( F1_X ).sign ? { 32hffffffff, neg_32 } :                                               // IF SIGN, SIGN EXTEND 32 BIT INTEGER
+                                                        unsignedfraction[0,32];                                                 //  ELSE COPY 32 BIT NUMBER
+}
+
+unit floatchangeprecision(                                                                                                      // DOUBLE/SINGLE/HALF <-> DOUBLE/SINGLE/HALF ( EXTEND/TRUNCATE )
+    input   uint2   rm,                                                                                                         // ROUNDING MODE
+    input   uint2   dest,                                                                                                       // TO DOUBLE(01)/SINGLE(00)/HALF(10)
+    input   uint10  DBIAS,                                                                                                      // BIAS FOR DOUBLE/SINGLE/HALF DESTINATION
+    input   uint2   source,                                                                                                     // FROM DOUBLE(01)/SINGLE(00)/HALF(10)
+    input   uint10  SBIAS,                                                                                                      // BIAS FOR DOUBLE/SINGLE/HALF SOURCE
+    input   uint6   MB,                                                                                                         // POSITION OFF THE ROUNDING BIT IN THE FRACTIONAL PART
+    input   uint64  F1_X,                                                                                                      // REGISTER VALUE TO EXTEND / TRUNCATE ( in double bitfields )
+    input   uint4   F1_TYPE,                                                                                                   // { INF sNAN qNAN ZERO }
+    output  uint64  RESULT,                                                                                                     // EXTENDED OR TRUNCATED RESULT
+    output  uint5   OP_FPUFLAGS                                                                                                 // FPU FLAGS
+) <reginputs> {
+    uint1               R <:: dest[0,1] ? 0 :
+                              dest[1,1] ? fp64( F1_X ).fraction[41,1] :
+                                          fp64( F1_X ).fraction[28,1];
+    uint1               L <:: dest[0,1] ? fp64( F1_X ).fraction[0,1] :
+                              dest[1,1] ? fp64( F1_X ).fraction[42,1] :
+                                          fp64( F1_X ).fraction[29,1];
+    uint1               S <:: dest[0,1] ? 0 :
+                              dest[1,1] ? |fp64( F1_X ).fraction[0,41] :
+                                          |fp64( F1_X ).fraction[0,28];
+
+    uint1               roundbit <:: ( rm == $RNE$ ) ? (R & (S | L)) :
+                                     ( rm == $RTZ$ ) ? 0 :
+                                     ( rm == $RDN$ ) ? (fp64( F1_X ).sign & (R | S)) :
+                                                       (~fp64( F1_X ).sign & (R | S));
+
+    uint53              roundedfraction <:: fp64( F1_X ).fraction + ( roundbit << MB );                                        // EXTRACT FRACTION + ROUNDING MASK, 53 BITS TO DETECT OVERFLOW
+    int13               exp <:: fp64( F1_X ).exponent - SBIAS + DBIAS + roundedfraction[52,1];                                 // SELECT EXPONENT AND - SOURCE BIAS, + DESTINATION BIAS + OVERFLOW
+    uint1               truncateOF <:: __signed( exp ) > __signed( { 2b0, DBIAS, 1b0 });                                        // CHECK IF EXPONENT IS TOO LARGE ( > 2*BIAS for single/half)
+    make_actual REPACK(                                                                                                         // PACKAGE COMPONENTS INTO FLOATING-POINT BITFIELDS WITH NAN-BOXING
+        dsh <: dest,
+        sign <:  fp64( F1_X ).sign, exp <: exp[0,11], fraction <: roundedfraction[0,52]
+    );
+    actual_special SPECIAL( dsh <: dest[0,2], sign <: fp64( F1_X ).sign );                                                     // GENERATE xINF, sNAN, qNAN, xZERO FOR DESTINATION FORMAT
+
+    OP_FPUFLAGS := |F1_TYPE ? { F1_TYPE[2,1], 4b0000 } : { 2b00, truncateOF, exp[12,1], source[0,1] | ( ~|source & dest[1,1] ) }; // NOT EXACT IF D -> S/H OR S -> H (need to check dropped bits)
+
+    RESULT := F1_TYPE[0,1] ? SPECIAL.xZERO :
+              F1_TYPE[1,1] ? SPECIAL.qNAN :
+              F1_TYPE[2,1] ? SPECIAL.sNAN :
+              F1_TYPE[3,1] ? SPECIAL.xINF :
+                              truncateOF ? SPECIAL.xINF : exp[12,1] ? SPECIAL.xZERO : REPACK.repack;                            // OF -> INF, UF -> ZERO, ELSE REPACK
+}
+
+unit floatround(                                                                                                                // 16/32/64 BIT FLOATING POINT ROUND ( CONVERT TO NEAREST INTEGER )
+    input   uint1   RM_ACTION,                                                                                                  // ROUNDING MODE BIT MASK
+    input   uint2   dsh,                                                                                                        // TO DOUBLE == 01 SINGLE == 00 HALF == 10
+    input   uint1   NX,
+    input   uint10  BIAS,                                                                                                       // BIAS FOR DOUBLE/SINGLE/HALF
+    input   uint6   MB,                                                                                                         // POSITION OFF THE ROUNDING BIT IN THE FRACTIONAL PART
+    input   uint64  F1,
+    input   uint64  F1_X,                                                                                                      // REGISTER VALUE TO CONVERT ( repacke into double bitfields )
+    input   uint4   F1_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } OF INPUT REGISTER
+    input   int13   EXP,                                                                                                        // EXPONENT WITH BIAS REMOVED
+    output  uint64  RESULT,                                                                                                     // RESULTING LONG OR INTEGER
+    output  uint5   OP_FPUFLAGS                                                                                                 // FPU FLAGS
+) <reginputs> {
+    uint1               NV <:: ( __signed( EXP ) > __signed( 63 ) );                                                            // INVALID IF TOO LARGE
+    uint65              in_fraction <:: { 1b1, fp64( F1_X ).fraction, 12b0 } >> ( 63 - EXP );                                  // EXTRACT FRACTION AND EXTEND TO 65 BITS, SHIFT INTO POSITION
+    uint64              unsignedinteger <:: in_fraction[1,64] + ( in_fraction[0,1] & RM_ACTION );                               // GENERATE ROUNDED 64 bit ABSOLUTE INTEGER
+    clz64 CLZ( number <: unsignedinteger );                                                                                     // COUNT LEADING ZEROS
+
+    uint6               RB[4] = { 39, 10, 52, -1 };                                                                             // POSITION OF THE ROUNDING BIT
+    uint53              roundedfraction <:: CLZ.shift[11,52] + ( ( CLZ.shift[RB[dsh],1] & RM_ACTION ) << MB );                  // GENERATE ROUNDED FRACTION, EXTRACT 52 BITS + ROUNDING MASK
+    uint13              exponent <:: 63 + BIAS - CLZ.zeros + roundedfraction[52,1];                                             // GENERATE EXPONENT AND ADD BIAS + 63 - CLZ + OVERFLOW
+    make_actual TOFLOAT(                                                                                                        // PACKAGE COMPONENTS INTO FLOATING-POINT BITFIELDS ( NAN BOXED )
+        dsh <: dsh,
+        sign <: fp64( F1_X ).sign, exp <: exponent[0,11], fraction <: roundedfraction[0,52]
+    );
+    actual_special SPECIAL( dsh <: dsh, sign <: fp64( F1_X ).sign );                                                           // GENERATE xINF, sNAN, qNAN, xZERO FOR DESTINATION FORMAT
+
+    OP_FPUFLAGS := { NV, 3b000, NX & ( RESULT != F1 ) };                                                                       // RETURN FLAGS { needs checking }
+
+    RESULT :=                                                ( |F1_TYPE | NV ) ? NV ? SPECIAL.xINF : F1 :                     // SPECIAL OR OVERFLOW
+              ( __signed( exponent - BIAS ) < __signed(0) ) | ~|unsignedinteger ? SPECIAL.xZERO :                               //  IS THE RESULT ZERO?
+                                                                                  TOFLOAT.repack;                               //  RETURN THE REPACKED FLOATING POINT NUMBER
+}
+
+// FUSED MULTIPLY AND ADD ( A*B+C A*B-C -A*B+C -A*B-C )
+//       MULTIPLICATION ( A*B+0.0 )
+//       ADDITION/SUBTRACTION ( A*1.0+B OR A*1.0-B )
+unit do_float_multiply(
+    input   uint10  BIAS,                                                                                                       // FLOATING POINT BIAS
+    input   uint64  F1_X,                                                                                                      // F1 ( repacked in double bitfields )
+    input   uint64  F2_X,                                                                                                      // F2 ( repacked in double bitfields )
+    output  uint1   sign,                                                                                                       // SIGN F1 x F2
+    output  uint106 fraction,                                                                                                   // PRODUCT F1 x F2
+    output  int13   exp                                                                                                         // EXPONENT F1 x F2
+) <reginputs> {
+    fraction := { 1b1, fp64( F1_X ).fraction } * { 1b1, fp64( F2_X ).fraction };                                              // CALCULATE THE PRODUCT BY MUTLIPLYING LEFT ALIGNED FRACTIONS
+    exp := fp64( F1_X ).exponent + fp64( F2_X ).exponent - ( { 2b00, BIAS, 1b0 } ) + fraction[105,1];                         // NEW EXP BY + INPUT EXP, - BIAS(2*) AND ( +1 if overflow )
+    sign := fp64( F1_X ).sign ^ fp64( F2_X ).sign;                                                                            // SIGN FOR PRODUCT (USED FOR QUOTIENT TOO)
+}
+unit do_float_addsub(
+    input   uint1   signA,
+    input   int13   expA,                                                                                                       // EXPONENT OF MULTIPLICATION ( may be out of normal range )
+    input   uint106 fractionA,                                                                                                  // RESULT OF MULTIPLICATION ( including leading 1 bit )
+    input   uint1   signC,
+    input   int13   expC,                                                                                                       // EXPONENT OF INPUT C ( bias removed )
+    input   uint52  fractionC,                                                                                                  // FRACTION OF INPUT C ( no leading 1 bit )
+    output  uint1   RESULTsign,
+    output  uint13  RESULTexp,
+    output  uint106 RESULTfraction
+) <reginputs> {
+    uint1               expAvexpC <:: ( __signed(expA) < __signed(expC) );                                                      // FIND SMALLEST EXPONENT
+    int13               shift <:: ( expAvexpC ? expC : expA ) - ( expAvexpC ? expA :expC );                                     // FIND THE SHIFT FOR ALIGNMENT
+    uint106             sigA <:: ( fractionA[105,1] ? { 1b0, fractionA[1,105] } : fractionA ) >> ( expAvexpC ? shift : 0 );                          // ALIGN A IF SMALLER
+    uint106             sigC <:: { 2b01, fractionC, 52b0 } >> ( expAvexpC ? 0 : shift );                                                             // GENERATE C FROM FRACTION, ALIGN IF SMALLER
+    uint1               AvB <:: ( __unsigned( sigA ) > __unsigned( sigC ) );                                                    // FIND LARGEST FRACTION ( when exponents are equal )
+    uint1               sign <:: ( signA ^ signC ) ? ( signA ? AvB : ~AvB ) : signA;                                            // DETERMINE RESULT SIGN
+
+    RESULTsign := sign;                                                                                                         // RETURN RESULT SIGN
+    RESULTexp := ( expAvexpC ? expC : expA ) + 1;                                                                                // RESULT EXPONENT IS LARGEST EXPONENT ( +1 FOR OVERFLOW )
+    RESULTfraction := ( signA ^ signC ) ? ( signA ^ sign ? sigC : sigA ) - ( signA ^ sign ? sigA : sigC ) : ( sigA + sigC );    // DIFFERING SIGNS, SUBTRACTION OR SAME SIGNS ADDITION
+}
+unit floatfused(
+    input   uint10  BIAS,                                                                                                       // BIAS FOR DOUBLE/SINGLE/HALF
+    input   uint64  c,                                                                                                          // B INPUT FOR A*B+C and - variations
+    input   uint4   F3_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } FOR C
+    input   uint1   F1_OR_F2_INF,                                                                                               // EITHER A OR B INF?
+    input   uint1   F1_AND_F2_INF,                                                                                              // BOTH A AND B INF?
+    input   uint1   F1_OR_F2_NAN,                                                                                               // EITHER A OR B NAN?
+    input   uint1   F1_OR_F2_ZERO,                                                                                              // EITHER A OR B ZERO?
+    input   uint1   F1_AND_F2_ZERO,                                                                                             // BOTH A AND B ZERO?
+    input   uint1   productsign,                                                                                                // MULTIPLICATION SIGN IN FOR ADD/SUB
+    input   uint106 productfraction,                                                                                            // MULTIPLICATION RESULT IN FOR ADD/SUB
+    input   int13   productexp,                                                                                                 // MULTIPLICATION EXPONENT FOR ADD/SUB
+    input   uint1   OF,
+    input   uint1   UF,
+    output  uint5   flags,                                                                                                      // OPERATION FLAGS
+    output  uint5   special,                                                                                                    // { C, INF, sNAN, qNAN, ZERO }, C+INF = C, INF = +/- INF FROM X
+    output  uint1   SIGN,
+    output  int13   EXP,
+    output  uint106 FRACTION
+) <reginputs> {
+    uint1   ZERO <:: F1_OR_F2_ZERO | F3_TYPE[0,1];                                                                             // DETECT ZERO
+    uint1   IF <:: F1_OR_F2_INF | F3_TYPE[3,1];                                                                                // DETECT INFINITY
+    uint1   NN <:: F1_OR_F2_NAN | |F3_TYPE[1,2];                                                                               // DETECT NAN
+    uint1   NV <:: ( F1_OR_F2_INF & F1_OR_F2_ZERO ) | ( F1_OR_F2_INF & ( F3_TYPE[3,1] & ( productsign ^ fp64( c ).sign ) ) );  // INF*0 INVALID | x == INF | +/- INF WITH DIFFERING SIGNS
+    uint2   ACTION <:: { IF | NN, ZERO };                                                                                       // DO FUSED IF NOT INFINITY, NAN OR ZERO
+
+    do_float_addsub ADDSUB(                                                                                                     // PERFORM THE ADDITION/SUBTRACTION, ACCOUNTING FOR SIGNS
+        signA <: productsign, expA <: productexp, fractionA <: productfraction,                                                 // SPECIAL CASE FOR SUBTRACTION WHEN EQUAL EXPONENTS
+        signC <: fp64( c ).sign, fractionC <: fp64( c ).fraction,                                           // AND SECOND FRACTION IS LARGER THAN THE FIRST
+        RESULTsign :> SIGN, RESULTexp :> EXP, RESULTfraction :> FRACTION
+    );
+
+    ADDSUB.expC := { 2b00, fp64( c ).exponent } - { 3b000, BIAS };                                                      // REMOVE BIAS FROM C INPUT
+
+    always {
+        switch( ACTION ) {
+            case 2b00: { special = |ADDSUB.RESULTfraction ? 5b00000 : 5b00001; }                                                // FUSED IS VALID, CHECK 0 FROM ADDSUB
+            case 2b01: {                                                                                                        // ZERO INPUT
+                special = ( F1_OR_F2_ZERO & F3_TYPE[0,1] ) ? 5b00001 :                                                         // MULTIPLY RESULT 0 AND C == 0, RETURN 0
+                                              F1_OR_F2_ZERO ? 5b10000 :                                                         // MULTIPLICATION INPUTS 0, RETURN C
+                                                              5b00000;                                                          // ADDITION/SUBTRACTION INPUT 0, RETURN MULTIPLICATION RESULT
+
+            }
+            default: {
+                switch( { IF, ZERO } ) {
+                    default: { special = 5b00010; }                                                                             // NAN INPUT
+                    case 2b10: {                                                                                                // NAN OR INFITITY RETURN qNAN OR INFINITY
+                        switch( { F1_OR_F2_INF, F3_TYPE[3,1] } ) {
+                            case 2b01: { special = 5b11000; }                                                                   // C INPUT IS INFINITY
+                            default: { special = NV ? 5b00010 : 5b01000; }                                                      // INVALID MIXED SIGN INFINITY, OR MULTIPLICATION IS INFINITY
+                        }
+                    }
+                    case 2b11: {                                                                                                // INFINITY AND ZERO INPUTS
+                        switch( { F1_OR_F2_INF, F3_TYPE[3,1] } ) {
+                            case 2b01: { special = 5b11000; }                                                                   // MULTIPLICATION IS 0 AND C INPUT IS INFINITY
+                            case 2b10: { special = 5b01000;}                                                                    // MULTIPLICATION IS INFINITY, C INPUT IS 0
+                            default: { special = 5b00010; }                                                                     // INFINITY x ZERO, INVALID qNAN
+                        }
+                    }
+                }
+            }
+        }
+
+        flags = {  NV, 1b0,                                                                                                     // RETURN FLAGS
+            ( ~|ACTION & OF ) | ( ( ACTION == 2b01 ) & ~F1_OR_F2_ZERO & ~F3_TYPE[0,1] & OF ),
+            ( ~|ACTION & UF ) | ( ( ACTION == 2b01 ) & ~F1_OR_F2_ZERO & ~F3_TYPE[0,1] & UF ),
+            1b0
+        };
+    }
+}
+
+// DIVIDE TWO FLOATING POINT NUMBERS
+unit prep_float_divide(
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint64  a,                                                                                                          // A INPUT FOR A/B
+    input   uint64  b,                                                                                                          // B INPUT FOR A/B
+    output  int13   quotientexp,                                                                                                // RESULT EXPONENT
+    output  uint108 sigA,                                                                                                       // DIVIDEND LEFT ALIGNED
+    output  uint106 sigB                                                                                                        // DIVISOR RIGHT ALIGNED
+) <reginputs> {
+    quotientexp := ( fp64( a ).exponent - fp64( b ).exponent ) - ( fp64(b).fraction > fp64(a).fraction );                       // SUBTRACT EXPONENTS FOR RESULT ( -1 if b  > a  )
+    sigA := dsh[0,1] ? { 1b1, fp64(a).fraction, 55b0 } :                                                                        // DIVIDEND LEFT ALIGNED
+            dsh[1,1] ? { 1b1, fp64(a).fraction[42,10], 13b0 } :
+                       { 1b1, fp64(a).fraction[29,23], 26b0 };
+    sigB := dsh[0,1] ? { 1b1, fp64(b).fraction } :                                                                              // DIVISOR RIGHT ALIGNED
+            dsh[1,1] ? { 1b1, fp64(b).fraction[42,10] } :
+                       { 1b1, fp64(b).fraction[29,23] };
+}
+unit do_float_divide(
+    input   uint1   START,
+    output  uint1   BUSY,
+    input   uint7   SB,
+    input   uint108 sigA,
+    input   uint108 sigB,
+    input   uint1   powTWO,
+    output  uint108 quotient(0)
+) <reginputs> {
+    uint7               bit = uninitialised;
+    uint7               bitNEXT <:: bit - 1;
+    uint108             remainder = uninitialised;
+    uint108             temporary <:: { remainder[0,107], sigA[bit,1] };
+    uint1               bitRESULT <:: __unsigned(temporary) >= __unsigned(sigB);
+    uint108             remainderNEXT <:: __unsigned(temporary) - ( bitRESULT ? __unsigned(sigB) : 0 );
+    uint1               FINISHED <:: &bit;
+    uint2               STATE = 1;
+                        $$ STATE_FPU_DIV_WAIT = 1
+                        $$ STATE_FPU_DIV_CALC = 2
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                BUSY = START & ~powTWO; if( START ) {
+                    if( powTWO ) {                                                                                              // DETECT DIVISION BY POWER OF 2
+                        quotient = sigA;                                                                                        //      RETURN DIVIDEND
+                    } else {
+                        bit = SB; quotient = 0; remainder = 0; STATE = $STATE_FPU_DIV_CALC$;
+                    }
+                }
+            }
+            case 1: {
+                if( FINISHED ) {
+                    BUSY = 0; STATE = $STATE_FPU_DIV_WAIT$;
+                } else {
+                    remainder = remainderNEXT; quotient[ bit, 1 ] = bitRESULT; bit = bitNEXT;
+                }
+            }
+        }
+    }
+}
+// RADIX-4 FLOATING POINT MANTISSA DIVISION (2 bits per cycle)
+unit do_float_divide_radix4(
+    input   uint1   START,
+    output  uint1   BUSY,
+    input   uint7   SB,
+    input   uint108 sigA,
+    input   uint108 sigB,
+    input   uint1   powTWO,
+    output  uint108 quotient(0)
+) <reginputs> {
+    uint8   bit = uninitialised;
+    uint8   bitNEXT <:: bit - 2;
+
+    uint110 d1 = uninitialised;
+    uint110 d2 = uninitialised;
+    uint110 d3 = uninitialised;
+
+    uint110 remainder = uninitialised;
+    uint110 temporary <:: { remainder[0,108], sigA[bit, 2] };
+
+    uint1   ge_d3 <:: temporary >= d3;
+    uint1   ge_d2 <:: temporary >= d2;
+    uint1   ge_d1 <:: temporary >= d1;
+
+    uint2   q_digit <:: ge_d3 ? 2b11 :
+                        ge_d2 ? 2b10 :
+                        ge_d1 ? 2b01 :
+                                2b00;
+
+    uint110 sub_val <:: ge_d3 ? d3 :
+                        ge_d2 ? d2 :
+                        ge_d1 ? d1 :
+                                110b0;
+
+    uint110 remainderNEXT <:: temporary - sub_val;
+
+    // Finished when bit underflows past 0 (bit[7,1] goes high)
+    uint1   FINISHED <:: bit[7,1];
+
+    uint2   STATE = 1;
+        $$ STATE_FPU_DIV_WAIT = 1
+        $$ STATE_FPU_DIV_CALC = 2
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                BUSY = START & ~powTWO;
+                if( START ) {
+                    if( powTWO ) {
+                        quotient = sigA;
+                    } else {
+                        // Align starting bit to the nearest even boundary: 107 -> 106, 49 -> 48, 23 -> 22
+                        bit       = { 1b0, SB[1,6], 1b0 };
+                        quotient  = 0;
+                        remainder = 0;
+
+                        d1        = sigB;
+                        d2        = sigB << 1;
+                        d3        = (sigB << 1) + sigB;
+
+                        STATE     = $STATE_FPU_DIV_CALC$;
+                    }
+                }
+            }
+            case 1: {
+                if( FINISHED ) {
+                    BUSY  = 0;
+                    STATE = $STATE_FPU_DIV_WAIT$;
+                } else {
+                    remainder          = remainderNEXT;
+                    quotient[ bit, 2 ] = q_digit;
+                    bit                = bitNEXT;
+                }
+            }
+        }
+    }
+}
+// RADIX-8 FLOATING POINT MANTISSA DIVISION (3 bits per cycle)
+unit do_float_divide_radix8(
+    input   uint1   START,
+    output  uint1   BUSY(0),
+    input   uint7   SB,
+    input   uint108 sigA,
+    input   uint108 sigB,
+    input   uint1   powTWO,
+    output  uint108 quotient(0)
+) <reginputs> {
+    uint8   bit = uninitialised;
+    uint8   bitNEXT <:: bit - 3;
+
+    // Multiples of divisor for 3-bit parallel comparison
+    uint111 d1 = uninitialised;
+    uint111 d2 = uninitialised;
+    uint111 d3 = uninitialised;
+    uint111 d4 = uninitialised;
+    uint111 d5 = uninitialised;
+    uint111 d6 = uninitialised;
+    uint111 d7 = uninitialised;
+
+    uint111 remainder = uninitialised;
+    // Align sigA by bringing down the next 3 bits.
+    // The explicit assignment alignments ensure sigA[bit, 3] stays within valid bounds.
+    uint111 temporary <:: { remainder[0,108], sigA[bit, 3] };
+
+    uint1   ge_d7 <:: temporary >= d7;
+    uint1   ge_d6 <:: temporary >= d6;
+    uint1   ge_d5 <:: temporary >= d5;
+    uint1   ge_d4 <:: temporary >= d4;
+    uint1   ge_d3 <:: temporary >= d3;
+    uint1   ge_d2 <:: temporary >= d2;
+    uint1   ge_d1 <:: temporary >= d1;
+
+    // Determine the 3-bit quotient slice
+    uint3   q_digit <:: ge_d7 ? 3b111 :
+                        ge_d6 ? 3b110 :
+                        ge_d5 ? 3b101 :
+                        ge_d4 ? 3b100 :
+                        ge_d3 ? 3b011 :
+                        ge_d2 ? 3b010 :
+                        ge_d1 ? 3b001 :
+                                3b000;
+
+    uint111 sub_val <:: ge_d7 ? d7 :
+                        ge_d6 ? d6 :
+                        ge_d5 ? d5 :
+                        ge_d4 ? d4 :
+                        ge_d3 ? d3 :
+                        ge_d2 ? d2 :
+                        ge_d1 ? d1 :
+                                111b0;
+
+    uint111 remainderNEXT <:: temporary - sub_val;
+
+    // Finished when bit underflows past 0 (bit[7,1] goes high)
+    uint1   FINISHED <:: bit[7,1];
+
+    uint2   STATE = 1;
+        $$ STATE_FPU_DIV_WAIT = 1
+        $$ STATE_FPU_DIV_CALC = 2
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                BUSY = START & ~powTWO;
+                if( START ) {
+                    if( powTWO ) {
+                        quotient = sigA;
+                    } else {
+                        // Align starting bit for precise 3-bit chunks:
+                        // Double (107) -> 105, Single (49) -> 48, Half (23) -> 21
+                        bit       = (SB == 107) ? 8d105 : (SB == 49) ? 8d48 : 8d21;
+                        quotient  = 0;
+                        remainder = 0;
+
+                        d1        = sigB;
+                        d2        = sigB << 1;
+                        d3        = (sigB << 1) + sigB;
+                        d4        = sigB << 2;
+                        d5        = (sigB << 2) + sigB;
+                        d6        = (sigB << 2) + (sigB << 1);
+                        d7        = (sigB << 3) - sigB;
+
+                        STATE     = $STATE_FPU_DIV_CALC$;
+                    }
+                }
+            }
+            case 1: {
+                if( FINISHED ) {
+                    BUSY  = 0;
+                    STATE = $STATE_FPU_DIV_WAIT$;
+                } else {
+                    remainder          = remainderNEXT;
+                    quotient[ bit, 3 ] = q_digit;
+                    bit                = bitNEXT;
+                }
+            }
+        }
+    }
+}
+unit floatdivide(
+    input   uint1   START,
+    output  uint1   BUSY,
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint64  a,                                                                                                          // A INPUT FOR A/B
+    input   uint5   F1_TYPE,                                                                                                    // { ZF INF sNAN qNAN ZERO }
+    input   uint64  b,                                                                                                          // B INPUT FOR A/B
+    input   uint5   F2_TYPE,                                                                                                    // { ZF INF sNAN qNAN ZERO }
+    input   uint7   SB,                                                                                                         // POINT TO START DIVISION AT 107/49/23 FOR DOUBLE/SINGLE?HALF
+    input   uint1   OF,
+    input   uint1   UF,
+    output  uint5   flags,                                                                                                      // OPERATION FLAGS
+    output  uint4   special,
+    output  int13   exponent,
+    output  uint106 fraction
+) <reginputs> {
+    uint1 NV <:: ( F1_TYPE[3,1] & F2_TYPE[3,1] ) | ( |F1_TYPE[1,2] | |F2_TYPE[1,2] ) | ( F1_TYPE[0,1] & F2_TYPE[0,1] );                                                            // NOT VALID IF INF, NAN OR B == 0
+    uint2               ACTION <:: { ( |F1_TYPE[1,3] | |F2_TYPE[1,3] ), ( F1_TYPE[0,1] | F2_TYPE[0,1] ) };                                              // DO DIVISION IF NOT INFINITY, NAN OR ZERO
+
+    prep_float_divide PREP(                                                                                                     // PREPARE THE DIVISION INPUTS
+        dsh <: dsh,
+        a <: a,
+        b <: b,
+        quotientexp :> exponent
+    );
+    $FP_DIVIDE$ DODIVIDE(                                                                                                   // DO THE DIVISION PASS QUOTIENT FOR NORMALISATION
+        SB <: SB,
+        sigA <: PREP.sigA,
+        sigB <: PREP.sigB,
+        powTWO <: F2_TYPE[4,1],
+        quotient :> fraction
+    );
+
+    DODIVIDE.START := START & ~|ACTION; BUSY := START | DODIVIDE.BUSY;                                                          // START AND BUSY FLAGS
+
+    always {
+        switch( ACTION ) {
+            case 2b00: { special = 0; }                                                                                         // DIVISION IS VALID
+            case 2b01: { special = ( F1_TYPE[0,1] & F2_TYPE[0,1] ) ? 7b0000010 : F2_TYPE[0,1] ? 7b0001000 : 7b0000001; }                                // ZERO INPUT, NAN IF BOTH ZERO, INF IF B ZERO, ZERO IF A ZERO
+            default: { special = NV ? 7b0000010 : ( F1_TYPE[0,1] | F2_TYPE[3,1] ) ? 7b0000001 : 7b0001000; }                                   // qNAN IF INVALID, 0 IF A IS 0 OR B IS INF, INF IF INF / OTHER
+        }
+        flags = { NV, F2_TYPE[0,1], ~|ACTION & OF, ~|ACTION & UF, 1b0};                                                                // RETURN FLAGS
+    }
+}
+
+// ADAPTED FROM https://projectf.io/posts/square-root-in-verilog/
+//
+// MIT License
+//
+// Copyright (c) 2021 Will Green, Project F
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+unit prep_float_sqrt(
+    input   uint10  BIAS,                                                                                                       // BIAS FOR DOUBLE/SINGLE/HALF
+    input   uint64  a,                                                                                                          // A INPUT FOR SQRT(A)
+    output  uint1   expODD,
+    output  int13   squarerootexp,
+    output  uint108 START_ac,
+    output  uint106 START_x
+) <reginputs> {
+    int13               expA <:: fp64( a ).exponent - BIAS;                                                                     // EXTRACT EXPONENT AND REMOVE BIAS
+
+    squarerootexp := expA >>> 1;                                                                                                // RESULT EXPONENT IS HALF OF INPUT EXPONENT
+    START_ac := expA[0,1] ? { 106b0, 1b1, a[ 51, 1 ] } : 1;                                                                     // STARTING ACCUMULATOR ( depends if exp is odd / even )
+    START_x := expA[0,1] ? { a[0,51], 55b0 } : { fp64( a ).fraction, 54b0 };                                                    // STARTING FRACTION ( depends if exp is odd / even )
+    expODD := expA[0,1];                                                                                                        // IS EXP ODD, RETURN SQRT(2) OR 1 FOR POWER OF 2 SQUAREROOTS
+}
+unit do_float_sqrt(
+    input   uint1   START,
+    output  uint1   BUSY,
+    input   uint6   SB,
+    input   uint1   powTWO,
+    input   uint1   expODD,
+    input   uint108 START_ac,
+    input   uint106 START_x,
+    output  uint54  squareroot
+) <reginputs> {
+    uint108             ac = uninitialised;
+    uint106             x = uninitialised;
+    uint108             test_res <:: ac - { squareroot, 2b01 };
+    uint6               i = uninitialised;
+    uint6               iNEXT <:: i - 1;
+    uint1               FINISHED <:: &i;
+
+    uint2               STATE = 1;
+                        $$ STATE_FPU_SQRT_WAIT  = 1
+                        $$ STATE_FPU_SQRT       = 2
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                BUSY = START & ~powTWO;
+                if( START ) {
+                    if( powTWO ) {
+                        squareroot = expODD ? 54h2D413CCCFE7799 : 1;                                                            // DETECT POWER OF 2, RETURN ROOT 2 / 1 IF EXP ODD / EVEN
+                    } else {
+                        i = SB; squareroot = 0; ac = START_ac; x = START_x;                                                     // SELECT STARTING BIT ( counter for number of bits to process )
+                        STATE = $STATE_FPU_SQRT$;
+                    }
+                }
+            }
+            case 1: {
+                if( FINISHED ) {
+                    BUSY = 0; STATE = $STATE_FPU_SQRT_WAIT$;
+                } else {
+                    ac = { test_res[107,1] ? ac[0,105] : test_res[0,105], x[104,2] };                                           // FIND NEW ACCUMULATOR
+                    squareroot = { squareroot[0,53], ~test_res[107,1] };                                                        // ADD NEXT BIT TO SQUAREROOT ( shift in from right )
+                    x = { x[0,104], 2b00 };                                                                                     // MOVE 2 PLACES ALONG REMAINING FRACTION
+                    i = iNEXT;                                                                                                  // MOVE TO NEXT BIT
+                }
+            }
+        }
+    }
+}
+// CASCADED/UNROLLED FLOATING POINT SQUARE ROOT (2 bits per cycle)
+unit do_float_sqrt_radix4(
+    input   uint1   START,
+    output  uint1   BUSY(0),
+    input   uint6   SB,
+    input   uint1   powTWO,
+    input   uint1   expODD,
+    input   uint108 START_ac,
+    input   uint106 START_x,
+    output  uint54  squareroot
+) <reginputs> {
+    uint108             ac = uninitialised;
+    uint106             x = uninitialised;
+    uint6               i = uninitialised;
+    uint6               iNEXT <:: i - 2;
+
+    // Finished when the counter underflows (MSB becomes 1)
+    uint1               FINISHED <:: i[5,1];
+
+    // --- UNROLLED STEP 1 ---
+    uint108             test_res_1 <:: ac - { squareroot, 2b01 };
+    uint1               bit_1      <:: ~test_res_1[107,1];
+    // Strict [0,105] slice matches original 107-bit width to protect the sign bit
+    uint108             ac_1       <:: { bit_1 ? test_res_1[0,105] : ac[0,105], x[104,2] };
+    uint54              sqrt_1     <:: { squareroot[0,53], bit_1 };
+
+    // --- UNROLLED STEP 2 ---
+    uint108             test_res_2 <:: ac_1 - { sqrt_1, 2b01 };
+    uint1               bit_2      <:: ~test_res_2[107,1];
+    uint108             ac_2       <:: { bit_2 ? test_res_2[0,105] : ac_1[0,105], x[102,2] };
+    uint54              sqrt_2     <:: { sqrt_1[0,53], bit_2 };
+
+    uint1               is_even_iters = uninitialised;
+
+    uint2               STATE = 1;
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                BUSY = START & ~powTWO;
+                if( START ) {
+                    if( powTWO ) {
+                        // Detect power of 2, return root 2 / 1 if exp odd / even
+                        squareroot = expODD ? 54h2D413CCCFE7799 : 1;
+                    } else {
+                        i = SB;
+                        squareroot = 0;
+                        ac = START_ac;
+                        x = START_x;
+
+                        // If SB is even (e.g. 24 for Single), we will generate 26 bits
+                        is_even_iters = ~SB[0,1];
+
+                        STATE = 2; // STATE_FPU_SQRT
+                    }
+                }
+            }
+            case 1: {
+                if( FINISHED ) {
+                    BUSY = 0;
+                    // Shift right by 1 to discard the 26th bit if Single Precision
+                    if (is_even_iters) {
+                        squareroot = squareroot >> 1;
+                    }
+                    STATE = 1; // STATE_FPU_SQRT_WAIT
+                } else {
+                    ac = ac_2;
+                    squareroot = sqrt_2;
+
+                    // Discard the 4 bits of x consumed across Step 1 and Step 2
+                    x = { x[0,102], 4b00 };
+                    i = iNEXT;
+                }
+            }
+        }
+        if( reset ) { BUSY = 0; STATE = 1; }
+    }
+}
+// CASCADED/UNROLLED FLOATING POINT SQUARE ROOT (3 bits per cycle)
+unit do_float_sqrt_radix8(
+    input   uint1   START,
+    output  uint1   BUSY(0),
+    input   uint6   SB,
+    input   uint1   powTWO,
+    input   uint1   expODD,
+    input   uint108 START_ac,
+    input   uint106 START_x,
+    output  uint54  squareroot
+) <reginputs> {
+    uint108             ac = uninitialised;
+    uint106             x = uninitialised;
+
+    // Use a 7-bit signed integer to safely detect underflow when subtracting 3
+    uint7               i = uninitialised;
+    uint7               iNEXT <:: i - 3;
+
+    // Finished when the counter underflows (MSB becomes 1)
+    uint1               FINISHED <:: i[6,1];
+
+    // --- UNROLLED STEP 1 ---
+    uint108             test_res_1 <:: ac - { squareroot, 2b01 };
+    uint1               bit_1      <:: ~test_res_1[107,1];
+    uint108             ac_1       <:: { bit_1 ? test_res_1[0,105] : ac[0,105], x[104,2] };
+    uint54              sqrt_1     <:: { squareroot[0,53], bit_1 };
+
+    // --- UNROLLED STEP 2 ---
+    uint108             test_res_2 <:: ac_1 - { sqrt_1, 2b01 };
+    uint1               bit_2      <:: ~test_res_2[107,1];
+    uint108             ac_2       <:: { bit_2 ? test_res_2[0,105] : ac_1[0,105], x[102,2] };
+    uint54              sqrt_2     <:: { sqrt_1[0,53], bit_2 };
+
+    // --- UNROLLED STEP 3 ---
+    uint108             test_res_3 <:: ac_2 - { sqrt_2, 2b01 };
+    uint1               bit_3      <:: ~test_res_3[107,1];
+    uint108             ac_3       <:: { bit_3 ? test_res_3[0,105] : ac_2[0,105], x[100,2] };
+    uint54              sqrt_3     <:: { sqrt_2[0,53], bit_3 };
+
+    uint2               shift_amt = uninitialised;
+
+    uint2               STATE = 1;
+                        $$ STATE_FPU_SQRT_WAIT  = 1
+                        $$ STATE_FPU_SQRT       = 2
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                BUSY = START & ~powTWO;
+                if( START ) {
+                    if( powTWO ) {
+                        // Detect power of 2, return root 2 / 1 if exp odd / even
+                        squareroot = expODD ? 54h2D413CCCFE7799 : 1;
+                    } else {
+                        i = { 1b0, SB };
+                        squareroot = 0;
+                        ac = START_ac;
+                        x = START_x;
+
+                        // Because radix-8 generates exactly 27 bits over 9 iterations for Single Precision (SB == 24),
+                        // but only 25 bits are required, we set an offset to shift by 2 at completion.
+                        shift_amt = (SB == 24) ? 2b10 : 2b00;
+
+                        STATE = $STATE_FPU_SQRT$;
+                    }
+                }
+            }
+            case 1: {
+                if( FINISHED ) {
+                    BUSY = 0;
+                    squareroot = squareroot >> shift_amt;
+                    STATE = $STATE_FPU_SQRT_WAIT$;
+                } else {
+                    ac = ac_3;
+                    squareroot = sqrt_3;
+
+                    // Discard the 6 bits of x consumed across Steps 1, 2, and 3
+                    x = { x[0,100], 6b000000 };
+                    i = iNEXT;
+                }
+            }
+        }
+        if( reset ) { BUSY = 0; STATE = 1; }
+    }
+}
+unit floatsqrt(
+    input   uint1   START,
+    output  uint1   BUSY,
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint10  BIAS,                                                                                                       // BIAS FOR DOUBLE/SINGLE/HALF
+    input   uint3   rm,                                                                                                         // ROUNDING MODE FLAG
+    input   uint64  a,                                                                                                          // A INPUT FOR SQRT(A)
+    input   uint5   F1_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } FOR A
+    input   uint6   SB,                                                                                                         // POINT TO START SQUAREROOT AT 53/24/11 FOR DOUBLE/SINGLE/HALF
+    input   uint1   OF,
+    input   uint1   UF,
+    output  uint5   flags,                                                                                                      // OPERATION FLAGS
+    output  uint7   special,
+    output  uint54  fraction,
+    output  int13   exponent
+) <reginputs> {
+    uint1               ACTION <:: ~( |F1_TYPE[0,4] | fp64( a ).sign );                                                        // CALCULATION VALID IF NORMAL POSITIVE NUMBER ( 0 IS SPECIAL )
+
+    prep_float_sqrt PREP( BIAS <: BIAS, a <: a, squarerootexp :> exponent );                                                    // PREPARE THE SQUAREROOT INPUTS
+    $FP_SQRT$ DOSQRT(                                                                                                       // CALCULATE SQUARE ROOT
+        SB <: SB,
+        powTWO <: F1_TYPE[4,1],
+        expODD <: PREP.expODD,
+        START_ac <: PREP.START_ac,
+        START_x <: PREP.START_x,
+        squareroot :> fraction
+    );
+
+    DOSQRT.START := START & ACTION; BUSY := START | DOSQRT.BUSY;                                                                // START AND BUSY FLAGS
+    flags := { |F1_TYPE[1,3] | ( fp64( a ).sign & ~F1_TYPE[0,1] ), 1b0, ACTION & OF, ACTION & UF, 1b0 };                                           // RETURN FLAGS, INVALID IF INFINITY, NAN OR NEGATIVE
+    special := ACTION ? 0 : ( fp64( a ).sign & ~F1_TYPE[0,1] ) ? 7b0000010 : 7b1000000;
+}
+
+// FLOATING POINT COMPARISONS - ADAPTED FROM SOFT-FLOAT
+/*============================================================================
+ *
+ * License for Berkeley SoftFloat Release 3e
+ *
+ * John R. Hauser
+ * 2018 January 20
+ *
+ * The following applies to the whole of SoftFloat Release 3e as well as to
+ * each source file individually.
+ *
+ * Copyright 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018 The Regents of the
+ * University of California.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions, and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions, and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the University nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS "AS IS", AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, ARE
+ * DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE FOR ANY
+ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS RESULTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * =============================================================================*/
+
+unit floatcompare(
+    input   uint64  a,                                                                                                          // A INPUT FOR A<B OR A==B ( repacked into double bitfields )
+    input   uint64  b,                                                                                                          // B INPUT FOR A<B OR A==B ( repacked into double bitfields )
+    input   uint1   F1_OR_F2_NAN,                                                                                               // { ZF INF sNAN qNAN ZERO } FOR A
+    input   uint1   F1_AND_F2_ZERO,                                                                                             // A == 0 AND B == 0?
+    input   uint1   F1_ZERO_FRACTION,                                                                                           // A FRACTION == 0?
+    input   uint1   F2_ZERO_FRACTION,                                                                                           // B FRACTION == 0?
+    output  uint1   less,                                                                                                       // A < B FLAG
+    output  uint1   equal                                                                                                       // A == B FLAG
+) <reginputs> {
+    uint1               a_eq_b <:: ( a == b );                                                                                  // A == B ( BITSTREAM )
+    uint1               a_lt_b <:: ( __unsigned( a ) < __unsigned( b ) );
+    uint1               abTRUEZERO <:: F1_AND_F2_ZERO & F1_ZERO_FRACTION & F2_ZERO_FRACTION;                                    // A == 0 & B == 0 ( NOT SUBNORMAL )
+
+    less := ~F1_OR_F2_NAN & ( ( fp64( a ).sign ^ fp64( b ).sign ) ? fp64( a ).sign & ~abTRUEZERO : ~a_eq_b & ( fp64( a ).sign ^  a_lt_b ) );
+    equal := ~F1_OR_F2_NAN & ( a_eq_b | abTRUEZERO );
+}

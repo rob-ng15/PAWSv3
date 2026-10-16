@@ -75,13 +75,17 @@ unit multiplex_display(
 
     palette_lookup pl <@palette_clock> ( palette <:> palette, index <: pixel );
 
-    uint8   BIT3to8[] = { 0, 36, 73, 109, 146, 182, 219, 255 };                                                                 // xxx -> xxxxxxxx
+    // Pure wiring: 3-bit to 8-bit expansion (v[1,2] takes the 2 MSBs)
+    uint3 red3   <:: status_display ? { status_p[6,2], status_p[0,1] } : { pixel[6,2], pixel[0,1] };
+    uint3 green3 <:: status_display ? status_p[3,3]                    : pixel[3,3];
+    uint3 blue3  <:: status_display ? { status_p[1,2], status_p[0,1] } : { pixel[1,2], pixel[0,1] };
 
-    pix_red :=                    status_display ? BIT3to8[ { status_p[6,2], status_p[0,1]} ] :
-                 colour ? pixel : usepalette ? palette.rdata0[16,8] : BIT3to8[ { pixel[6,2], pixel[0,1]} ];
-    pix_green :=                  status_display ? BIT3to8[ status_p[3,3] ] :
-                 colour ? pixel : usepalette ? palette.rdata0[8,8] : BIT3to8[ pixel[3,3] ];
-    pix_blue :=                   status_display ? BIT3to8[ { status_p[1,2], status_p[0,1]} ] :
-                 colour ? pixel : usepalette ? palette.rdata0[0,8] : BIT3to8[ { pixel[1,2], pixel[0,1]} ];
+    uint8 red_expanded   <:: { red3,   red3,   red3[1,2] };
+    uint8 green_expanded <:: { green3, green3, green3[1,2] };
+    uint8 blue_expanded  <:: { blue3,  blue3,  blue3[1,2] };
+
+    pix_red   := status_display ? red_expanded   : colour ? pixel : usepalette ? palette.rdata0[16,8] : red_expanded;
+    pix_green := status_display ? green_expanded : colour ? pixel : usepalette ? palette.rdata0[8,8]  : green_expanded;
+    pix_blue  := status_display ? blue_expanded  : colour ? pixel : usepalette ? palette.rdata0[0,8]  : blue_expanded;
 }
 

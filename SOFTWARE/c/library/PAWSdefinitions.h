@@ -98,21 +98,30 @@
 #define CU_LR1 0,5,0,0
 #define CU_LR2 0,6,0,0
 #define CU_LR3 0,7,0,0
+#define CU_WAITACTIVE 0,4,1,0
+#define CU_WAITY 0,5,1
+#define CU_WAITX 0,6,1
+#define CU_WAITVB 0,7,1,0
 #define CU_SET 1
 #define CU_ADD 2
 #define CU_SUB 3
 #define CU_AND 4
 #define CU_OR  5
 #define CU_XOR 6
-#define CU_SHL 7
+#define CU_MUL 7
 #define CU_SHR 8
 #define CU_SEQ 9
-#define CU_SNE 10
+#define CU_SNE 9
+#define CU_ABS 10
 #define CU_SLT 11
+#define CU_SGE 11
 #define CU_SLE 12
-#define CU_RND 13
+#define CU_SGT 12
+#define CU_MIN 13
+#define CU_MAX 13
 #define CU_LFM 14
 #define CU_STM 15
+#define CU_MOD_MAX(val) ((val) | (1 << 9))
 
 // REGISTER NAMES { VBLANK, X, Y, RC, R0, R1, R2, R3 } WHEN READING ( RC, R0, R1, R2, R3 ) ALSO WHEN WRITING
 #define CU_RB 0
@@ -123,6 +132,7 @@
 #define CU_R1 5
 #define CU_R2 6
 #define CU_R3 7
+#define CU_RNG 8
 
 // BACKGROUND GENERATOR REGISTER NAMES { MODE, COLOUR, ALT COLOUR } REPLACE { VBLANK, X, Y } WHEN WRITING
 #define CU_BM 0
@@ -294,8 +304,10 @@
 // SCREEN MODES
 #define MODE_RGBM 0
 #define MODE_GREY 1
-#define LTM_LOW 1
-#define UTM_LOW 2
+#define TM0_LOW 1
+#define TM1_LOW 2
+#define TM2_LOW 4
+#define TM3_LOW 8
 #define CM_LOW 4
 
 // PIXEL BLOCK MODES

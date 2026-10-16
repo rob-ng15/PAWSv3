@@ -1,285 +1,276 @@
-// Sprite update flag ( NO LONGER APPLIED BY HARDWARE, IMPLEMENTED IN THE LIBRARY AS A COMPATIBILITY FUNCTION )
-bitfield spriteupdate {
-    uint1   y_act,                                                                                                              // 1 - kill when off screen, 0 - wrap
-    uint1   x_act,                                                                                                              // 1 - kill when off screen, 0 - wrap
-    uint1   tile_act,                                                                                                           // 1 - increase the tile number
-    uint1   dysign,                                                                                                             // dy - 2's complement update for the y coordinate
-    uint4   dy,
-    uint1   dxsign,                                                                                                             // dx - 2's complement update for the x coordinate
-    uint4   dx
-}
+// ==============================================================================
+// REPLACEMENT SPRITE ENGINE (Split Render/Display, Single Sprite Sheet)
+// ==============================================================================
 
-// Sprite action flag
-bitfield spriteaction {
-    uint2   layer,                                                                                                              // layer number
-    uint1   mode,                                                                                                               // == 0 8x16x16, == 1 2x32x32 Sprite display mode
-    uint1   updown,                                                                                                             // == 0 shift up, == 1 shift down ( by next bitfield )
-    uint2   scale,                                                                                                              // number of bits to shift left or right to scale the sprite
-    uint1   refrot,                                                                                                             // == 0 reflect, == 1 rotate ( by next bitfield )
-    uint2   action                                                                                                              // ( reflect { y, x } ) ( rotate { 270, 180, 90, 0 } )
-}
-
-unit sprite_max(
-    input   int11   x,
-    input   int11   y,
-    input   uint8   size,
-    output! int11   max_x,
-    output! int11   max_y
-) <reginputs> {
-    max_x := x + size;
-    max_y := y + size;
-}
-
-unit sprite_layer(
+unit sprite_display(
     input   uint1               video_clock,
 
-    input   uint10              pix_x,                                                                                          // DISPLAY INPUTS   X
-    input   uint10              pix_x1,                                                                                         //                  X+1 FOR PRE-FETCHING
-    input   uint9               pix_y,                                                                                          //                  Y
-    input   uint1               pix_end,                                                                                        //                  ( 639, 479 )
+    input   uint10              pix_x,
+    input   uint10              pix_x1,
+    input   uint9               pix_y,
+    input   uint1               pix_end,
     input   uint1               pix_active,
 
-    output! uint32              pixels,                                                                                        // DISPLAY OUTPUTS  PIXEL FOR SPRITE LAYERS
-    output! uint4               sprite_display,                                                                                 //                  PIXELS TO DISPLAY?
+    output! uint32              pixels,
+    output! uint4               sprite_display,
 
-    input   uint1               collision_bitmap_0,                                                                             // BITMAP 0 PIXEL?
-    input   uint1               collision_bitmap_1,                                                                             // BITMAP 1 PIXEL?
-    input   uint1               collision_layer_2,                                                                              // TILEMAP 0 PIXEL?
-    input   uint1               collision_layer_3,                                                                              // TILEMAP 1 PIXEL?
-    input   uint1               collision_layer_4,                                                                              // TILEMAP 2 PIXEL?
-    input   uint1               collision_layer_5,                                                                              // TILEMAP 3 PIXEL?
-    input   uint1               collision_layer_6,                                                                              // CHARACTER MAP PIXEL?
+    input   uint1               collision_bitmap_0,
+    input   uint1               collision_bitmap_1,
+    input   uint1               collision_layer_2,
+    input   uint1               collision_layer_3,
+    input   uint1               collision_layer_4,
+    input   uint1               collision_layer_5,
+    input   uint1               collision_layer_6,
 
-    dualport_bram_port1         sprite_active,                                                                                  // SPRITE REGISTERS FROM CPU
-    dualport_bram_port1         sprite_actions,
-    dualport_bram_port1         sprite_size,
-    dualport_bram_port1         sprite_tile,
-    dualport_bram_port1         sprite_x,
-    dualport_bram_port1         sprite_y,
-    simple_dualport_bram_port1  sprite_collision_memory,                                                                        // SPRITE COLLISION REGISTERS
-    simple_dualport_bram_port1  sprite_layer_collision_memory,                                                                  // SPRITE COLLISION LAYER REGISTERS
+    simple_dualport_bram_port1  sprite_layer_collision_memory,
 
-    input   uint11  writerpixel,                                                                                                // FOR WRITING SPRITE TILEMAPS  PIXEL NUMBER
-    input   uint8   WDATA,                                                                                                      //                              PIXEL
-    input   uint32  wenable1                                                                                                    //                              WRITE ENDABLE FLAGS
+    // Line Buffer Interface (Forced combinational)
+    output(!) uint10            lb_addr0,
+                    input     uint18            lb_rdata0,
+                    output(!) uint10            lb_addr1,
+                    output(!) uint18            lb_wdata1,
+                    output(!) uint1             lb_wenable1
 ) <reginputs> {
-    uint2               STATE = 2;
-                        $$ STATE_SPRITE_COPY    = 1
-                        $$ STATE_SPRITE_DISPLAY = 2
-    uint6               outputcount = -1;
-    uint6               outputcount_NEXT <::outputcount + 1;
-
-    $$for i=0,31 do
-    dualport_bram uint8 tiles_$i$[2048] = uninitialised;                                                                        // Sprite Tiles - 16 x 16 x 8 in RRGGGBBM colour
-    uint64  detect_collision_$i*2$ = uninitialised;                                                                             // Collision detection flag sprite to sprite ( 0-63 )
-    uint7   detect_layer_$i*2$ = uninitialised;                                                                                 // Collision detection flag sprite to other layers ( 0-63 )
-    uint64  detect_collision_$i*2+1$ = uninitialised;                                                                           // Collision detection flag sprite to sprite ( 0-63 )
-    uint7   detect_layer_$i*2+1$ = uninitialised;                                                                               // Collision detection flag sprite to other layers ( 0-63 )
-
-    sprite_generator SPRITE_$i*2$(                                                                                              // SPRITE GENERATORS, EVEN SPRITES, USING TILE0
-        tiles <:> tiles_$i$,
-        pix_end <: pix_end, pix_active <: pix_active,
-        x <: pix_x,
-        x1 <: pix_x1,
-        y <: pix_y,
-    );
-    sprite1_generator SPRITE_$i*2+1$(                                                                                           // SPRITE GENERATORS, ODD SPRITES, USING TILE1
-        tiles <:> tiles_$i$,
-        pix_end <: pix_end, pix_active <: pix_active,
-        x <: pix_x,
-        x1 <: pix_x1,
-        y <: pix_y,
-
-        writerpixel <: writerpixel,
-        WDATA <: WDATA,
-        wenable1 <: wenable1[$i$,1]
-    );
-    $$end
-
-    sprite_max MAX( x <: sprite_x.rdata1, y <: sprite_y.rdata1, size <: sprite_size.rdata1 );
-
-    uint64  sprite_visible <: {                                                                                                 // SPRITE VISIBLE FLAGS AT EACH PIXEL
-                                $$for i=0,62 do
-                                SPRITE_$63-i$.pix_visible,
-                                $$end
-                                SPRITE_0.pix_visible
-                              };
-    uint7   layer_visible <: {
-                                collision_layer_6,                                                                              //      CHARACTER MAP
-                                collision_layer_5,                                                                              //      TILEMAP 3
-                                collision_layer_4,                                                                              //      TILEMAP 2
-                                collision_layer_3,                                                                              //      TILEMAP 1
-                                collision_layer_2,                                                                              //      TILEMAP 0
-                                collision_bitmap_1,                                                                             //      BITMAP 1
-                                collision_bitmap_0                                                                              //      BITMAP 0
-                             };
-
-    sprite_collision_memory.wenable1 := STATE[0,1]; sprite_layer_collision_memory.wenable1 := STATE[0,1];
-    sprite_display := 0;
+    uint7   detect_layer[64] = uninitialised;
+    uint7   copy_idx = 0;
+    uint1   copying = 0;
 
     always {
-        onehot( STATE ) {
-            case 0: {                                                                                                           // COPY CPU INPUTS TO SPRITE GENERATORS
-                sprite_collision_memory.addr1 = outputcount; sprite_layer_collision_memory.addr1 = outputcount;
-                sprite_active.addr1 = outputcount_NEXT;
-                sprite_tile.addr1 = outputcount_NEXT;
-                sprite_actions.addr1 = outputcount_NEXT;
-                sprite_size.addr1 = outputcount_NEXT;
-                sprite_x.addr1 = outputcount_NEXT;
-                sprite_y.addr1 = outputcount_NEXT;
+        // 1. TAIL-CLEARING
+        lb_addr1    = pix_x;
+        lb_wdata1   = 0;
+        lb_wenable1 = pix_active;
 
-                switch( outputcount ) {                                                                                         // CYCLE THROUGH EACH OF THE SPRITES
-                    $$for i=0,63 do
-                    case $i$: {
-                        SPRITE_$i$.sprite_active = sprite_active.rdata1;
-                        SPRITE_$i$.sprite_tile_number = sprite_tile.rdata1;
-                        SPRITE_$i$.sprite_actions = sprite_actions.rdata1;
-                        SPRITE_$i$.sprite_x = sprite_x.rdata1;
-                        SPRITE_$i$.sprite_y = sprite_y.rdata1;
-                        SPRITE_$i$.max_x = MAX.max_x;
-                        SPRITE_$i$.max_y = MAX.max_y;
-                        sprite_collision_memory.wdata1 = detect_collision_$i$; detect_collision_$i$ = 0;
-                        sprite_layer_collision_memory.wdata1 = detect_layer_$i$; detect_layer_$i$ = 0;
+        sprite_layer_collision_memory.wenable1 = 0;
+
+        // 2. DISPLAY OUT
+        lb_addr0 = pix_x1; // Pre-fetch for 1-cycle BRAM latency
+
+        uint1  out_valid  = lb_rdata0[16,1];
+        uint2  out_layer  = lb_rdata0[14,2];
+        uint6  out_sprite = lb_rdata0[8,6];
+        uint8  out_pixel  = lb_rdata0[0,8];
+        uint7  layer_vis  = { collision_layer_6, collision_layer_5, collision_layer_4, collision_layer_3, collision_layer_2, collision_bitmap_1, collision_bitmap_0 };
+
+        sprite_display = 0;
+        pixels = 0;
+
+        if (pix_active && out_valid) {
+            sprite_display[ out_layer, 1 ] = 1;
+            pixels[ { out_layer, 3b000 }, 8 ] = out_pixel;
+
+            if (layer_vis != 0) {
+                detect_layer[out_sprite] = detect_layer[out_sprite] | layer_vis;
+            }
+        }
+
+        // 3. LAYER COLLISION COPY
+        if (copying) {
+            if (copy_idx < 64) {
+                sprite_layer_collision_memory.addr1 = copy_idx;
+                sprite_layer_collision_memory.wdata1 = detect_layer[copy_idx];
+                sprite_layer_collision_memory.wenable1 = 1;
+            }
+            if (copy_idx > 0 && copy_idx <= 64) {
+                detect_layer[copy_idx - 1] = 0;
+            }
+
+            copy_idx = copy_idx + 1;
+            if (copy_idx == 65) {
+                copying = 0;
+            }
+        }
+
+        if (pix_x == 639 && pix_end) {
+            copying = 1;
+            copy_idx = 0;
+        }
+    }
+}
+
+unit sprite_render(
+    input   uint1               video_clock,
+
+    input   uint10              pix_x,
+    input   uint9               pix_y,
+    input   uint1               pix_end,
+
+    output(!) uint1             out_ping_pong,
+
+                   dualport_bram_port1         sprite_active,
+                   dualport_bram_port1         sprite_actions,
+                   dualport_bram_port1         sprite_size,
+                   dualport_bram_port1         sprite_tile,
+                   dualport_bram_port1         sprite_x,
+                   dualport_bram_port1         sprite_y,
+                   simple_dualport_bram_port1  sprite_collision_memory,
+
+                   dualport_bram_port0         tiles,
+
+                   // Line Buffer Interface (Forced combinational)
+                   output(!) uint10            lb_addr1,
+                   input     uint18            lb_rdata1,
+                   output(!) uint18            lb_wdata1,
+                   output(!) uint1             lb_wenable1
+) <reginputs> {
+
+    int11   reg_x[64]       = uninitialised;
+    int11   reg_y[64]       = uninitialised;
+    uint8   reg_tile[64]    = uninitialised;
+    uint9   reg_actions[64] = uninitialised;
+    uint8   reg_size[64]    = uninitialised;
+    uint1   reg_active[64]  = uninitialised;
+    int11   reg_max_x[64]   = uninitialised;
+    int11   reg_max_y[64]   = uninitialised;
+
+    uint64  detect_collision[64] = uninitialised;
+
+    uint3   r_state = 0;
+    uint1   ping_pong = 0;
+    uint7   copy_idx = 0;
+    uint7   render_idx = 0;
+    int11   render_x = 0;
+    int11   render_y = 0;
+    int11   drawn_screen_x = 0;
+    uint1   do_draw = 0;
+
+    always {
+        out_ping_pong = ping_pong;
+        sprite_collision_memory.wenable1 = 0;
+
+        // Default values for line buffer
+        lb_wenable1 = 0;
+        lb_addr1 = 0;
+        lb_wdata1 = 0;
+
+        switch (r_state) {
+            case 0: { // IDLE
+            }
+            case 1: { // COPY CPU BRAMS
+                if (copy_idx < 64) {
+                    sprite_active.addr1  = copy_idx;
+                    sprite_actions.addr1 = copy_idx;
+                    sprite_size.addr1    = copy_idx;
+                    sprite_tile.addr1    = copy_idx;
+                    sprite_x.addr1       = copy_idx;
+                    sprite_y.addr1       = copy_idx;
+
+                    sprite_collision_memory.addr1    = copy_idx;
+                    sprite_collision_memory.wdata1   = detect_collision[copy_idx];
+                    sprite_collision_memory.wenable1 = 1;
+                }
+
+                if (copy_idx > 0 && copy_idx <= 64) {
+                    uint6 prev_idx = copy_idx - 1;
+                    reg_active[prev_idx]  = sprite_active.rdata1;
+                    reg_actions[prev_idx] = sprite_actions.rdata1;
+                    reg_size[prev_idx]    = sprite_size.rdata1;
+                    reg_tile[prev_idx]    = sprite_tile.rdata1;
+                    reg_x[prev_idx]       = sprite_x.rdata1;
+                    reg_y[prev_idx]       = sprite_y.rdata1;
+                    reg_max_x[prev_idx]   = sprite_x.rdata1 + sprite_size.rdata1;
+                    reg_max_y[prev_idx]   = sprite_y.rdata1 + sprite_size.rdata1;
+
+                    detect_collision[prev_idx] = 0;
+                }
+
+                copy_idx = copy_idx + 1;
+                if (copy_idx == 65) {
+                    r_state = 2;
+                }
+            }
+            case 2: { // EVAL
+                if (render_idx == 64) {
+                    r_state = 0;
+                } else {
+                    uint1 in_y = (render_y >= reg_y[render_idx]) && (render_y < reg_max_y[render_idx]);
+                    if (reg_active[render_idx] && in_y) {
+                        r_state = 3;
+                        render_x = 0;
+                    } else {
+                        render_idx = render_idx + 1;
                     }
-                    $$end
                 }
-
-                if( &outputcount ) { STATE = $STATE_SPRITE_DISPLAY$; } else { outputcount = outputcount_NEXT; }                 // WHEN COMPLETED ALL SPRITES SWITCH TO DISPLAY STATE
             }
-            case 1: {                                                                                                           // DISPLAY SPRITES
-                $$for i=0,63 do
-                if( SPRITE_$i$.pix_visible ) {                                                                                  // ARE SPRITES 0 TO 63 VISIBLE?
-                    sprite_display[ spriteaction( SPRITE_$i$.sprite_actions ).layer, 1 ] = 1;                                   //      SET SPRITE LAYER VISIBLE FLAG
-                    pixels[ { spriteaction( SPRITE_$i$.sprite_actions ).layer, 3b000 }, 8 ] = SPRITE_$i$.pixel;                 //      SET SPRITE LAYER PIXEL
-                    detect_collision_$i$ = detect_collision_$i$ | sprite_visible;                                               //  UPDATE SPRITE TO SPRITE COLLISIONS
-                    detect_layer_$i$ = detect_layer_$i$ | layer_visible;                                                        //  UPDATE SPRITE TO LAYER COLLISIONS
+            case 3: { // DRAW_READ
+                uint11 screen_x = reg_x[render_idx] + render_x;
+
+                if (screen_x < 640 && render_x < reg_size[render_idx]) {
+                    int11 X = render_x;
+                    int11 Y = render_y - reg_y[render_idx];
+                    uint9 actions = reg_actions[render_idx];
+
+                    // Apply blocky 2x scaling FIRST if SPRITE_DOUBLE (bit 6) is set
+                    int11 scaled_X = actions[6,1] ? (X >>> 1) : X;
+                    int11 scaled_Y = actions[6,1] ? (Y >>> 1) : Y;
+
+                    // Then apply standard bit-shift scaling
+                    uint5 xspriteshift = actions[5,1] ? (scaled_X << actions[3,2]) : (scaled_X >>> actions[3,2]);
+                    uint5 yspriteshift = actions[5,1] ? (scaled_Y << actions[3,2]) : (scaled_Y >>> actions[3,2]);
+
+                    uint1 action00 = ( ~|actions[0,2] );
+                    uint1 action01 = ( actions[0,2] == 2b01 );
+                    uint1 action10 = ( actions[0,2] == 2b10 );
+
+                    uint5 U = actions[2,1] ? (action00 ? xspriteshift : action01 ? yspriteshift : action10 ? ~xspriteshift : ~yspriteshift) :
+                    (actions[0,1] ? ~xspriteshift : xspriteshift);
+                    uint5 V = actions[2,1] ? (action00 ? yspriteshift : action01 ? ~xspriteshift : action10 ? ~yspriteshift : xspriteshift) :
+                    (actions[1,1] ? ~yspriteshift : yspriteshift);
+
+                    // ALWAYS restrict lookup to a strict 16x16 tile using 4 bits
+                    tiles.addr0 = { reg_tile[render_idx], V[0,4], U[0,4] };
+
+                    lb_addr1 = screen_x;
+                    drawn_screen_x = screen_x;
+                    do_draw = 1;
+                } else {
+                    do_draw = 0;
                 }
-                $$end
+                r_state = 4;
             }
-        }
+            case 4: { // DRAW_WRITE
+                if (do_draw) {
+                    uint8 pixel = tiles.rdata0;
+                    if (pixel != 64) {
+                        uint1  lb_valid = lb_rdata1[16,1];
 
-        if( pix_end ) { STATE = $STATE_SPRITE_COPY$; outputcount = 0; }                                                         // CHECK FOR START OF VBLANK
-    }
-}
+                        if (lb_valid) {
+                            uint6 existing_sprite = lb_rdata1[8,6];
+                            detect_collision[render_idx][existing_sprite, 1] = 1;
+                            detect_collision[existing_sprite][render_idx, 1] = 1;
+                        }
 
-unit sprite_transform(                                                                                                          // TRANSFORM X,Y FOR REFLECTION/ROTATION IN SPRITE TILE
-    input   uint5   xspriteshift,                                                                                               // X COORDINATE IN SPRITE TILE
-    input   uint5   yspriteshift,                                                                                               // Y COORDINATE IN SPRITE TILE
-    input   uint3   actions,                                                                                                    // REFLECTION/ROTATION FLAGS
-    output! uint5   x,                                                                                                          // TRANSFORMED X COORDINATE
-    output! uint5   y                                                                                                           // TRANSFORMED Y COORDINATE
-) <reginputs> {
-    uint1   action00 <:: ( ~|actions[0,2] );                                                                                     // CHECK ACTION FLAGS FOR REFLECTION/ROTATION
-    uint1   action01 <:: ( actions[0,2] == 2b01 );
-    uint1   action10 <:: ( actions[0,2] == 2b10 );
+                        uint18 new_data = { 2b01, reg_actions[render_idx][7,2], render_idx[0,6], pixel };
 
-    x := actions[2,1] ? action00 ? xspriteshift : action01 ?  yspriteshift : action10 ? ~xspriteshift : ~yspriteshift :         // CALCULATE X IN TILE FOR  ROTATION
-                        actions[0,1] ? ~xspriteshift : xspriteshift;                                                            //                          REFLECTION
-    y := actions[2,1] ? action00 ? yspriteshift : action01 ? ~xspriteshift : action10 ? ~yspriteshift :  xspriteshift :         // CALCULATE Y IN TILE FOR  ROTATION
-                        actions[1,1] ? ~yspriteshift : yspriteshift;                                                            //                          REFLECTION
-}
-
-unit sprite_generator(
-    input   uint1   pix_end,
-    input   uint1               pix_active,
-    input   uint11  x,
-    input   uint11  x1,
-    input   uint10  y,
-    input   uint1   sprite_active,
-    input   uint9   sprite_actions,
-    input   int11   sprite_x,
-    input   int11   sprite_y,
-    input   int11   max_x,
-    input   int11   max_y,
-    input   uint3   sprite_tile_number,
-    dualport_bram_port0 tiles,
-    output! uint1   pix_visible,
-    output! uint8   pixel
-) <reginputs> {
-    int11   X <: ( x1 - sprite_x );
-    int11   Y <: ( { 1b0, y } - sprite_y );
-
-    sprite_transform TRANSFORM( actions <: sprite_actions );                  // PERFORM ROTATION/REFLECTION
-
-    TRANSFORM.xspriteshift := sprite_actions[5,1] ? ( X << sprite_actions[3,2] ) : ( X >>> sprite_actions[3,2] );
-    TRANSFORM.yspriteshift := sprite_actions[5,1] ? ( Y << sprite_actions[3,2] ) : ( Y >>> sprite_actions[3,2] );
-
-    tiles.addr0 := sprite_actions[6,1] ? { sprite_tile_number[0,1], TRANSFORM.y,      TRANSFORM.x } :                           // 2 x 32x32 in tilemap
-                                         { sprite_tile_number,      TRANSFORM.y[0,4], TRANSFORM.x[0,4] };                       // 8 x 16x16 in tilemap
-    pixel := tiles.rdata0; pix_visible := 0;                                                                                    // OUTPUT PIXEL COLOUR ( current pixel )
-
-    always {
-        uint2   STATE = uninitialised;
-
-        if( sprite_active & pix_active ) {
-            onehot( STATE ) {
-                case 0: {
-                    if( ( ~|y & sprite_y[10,1] & ~max_y[10,1] ) | ( { 1b0, y } == sprite_y ) ) { STATE = 2; }
+                        lb_addr1 = drawn_screen_x;
+                        lb_wdata1 = new_data;
+                        lb_wenable1 = 1;
+                    }
                 }
-                case 1: {
-                    pix_visible = ( tiles.rdata0 != 64 ) & ( __signed( x ) >= __signed( sprite_x ) ) &                          // ARE WE IN THE SPRITE?
-                                                           ( __signed( x ) <  __signed( max_x ) );
+
+                render_x = render_x + 1;
+                if (render_x == reg_size[render_idx]) {
+                    r_state = 2;
+                    render_idx = render_idx + 1;
+                } else {
+                    r_state = 3;
                 }
             }
         }
 
-        if( pix_end | ( { 1b0, y } == max_y ) ) { STATE = 1; }
-    }
-}
+        if (pix_x == 639) {
+            ping_pong  = ~ping_pong;
+            render_y   = pix_y + 1;
+            render_idx = 0;
 
-unit sprite1_generator(
-    input   uint1   pix_end,
-    input   uint1               pix_active,
-    input   uint11  x,
-    input   uint11  x1,
-    input   uint10  y,
-    input   uint1   sprite_active,
-    input   uint9   sprite_actions,
-    input   int11   sprite_x,
-    input   int11   sprite_y,
-    input   int11   max_x,
-    input   int11   max_y,
-    input   uint3   sprite_tile_number,
-    dualport_bram_port1 tiles,
-    output! uint1   pix_visible,
-    output! uint8   pixel,
-
-    input   uint11  writerpixel,
-    input   uint8   WDATA,
-    input   uint1   wenable1
-) <reginputs> {
-    int11   X <: ( x1 - sprite_x );
-    int11   Y <: ( { 1b0, y } - sprite_y );
-
-    sprite_transform TRANSFORM( actions <: sprite_actions );                  // PERFORM ROTATION/REFLECTION
-
-    TRANSFORM.xspriteshift := sprite_actions[5,1] ? ( X << sprite_actions[3,2] ) : ( X >>> sprite_actions[3,2] );
-    TRANSFORM.yspriteshift := sprite_actions[5,1] ? ( Y << sprite_actions[3,2] ) : ( Y >>> sprite_actions[3,2] );
-
-    tiles.addr1 :=            wenable1 ? writerpixel :                                                                          // WRITE/READ ADDRESS ( next pixel ) FOR SPRITE TILE
-                   sprite_actions[6,1] ? { sprite_tile_number[0,1], TRANSFORM.y,      TRANSFORM.x } :                           //  2 x 32x32 in tilemap
-                                         { sprite_tile_number,      TRANSFORM.y[0,4], TRANSFORM.x[0,4] };                       //  8 x 16x16 in tilemap
-    tiles.wdata1 := WDATA;                                                                                                      // PIXEL TO WRITE
-    tiles.wenable1 := wenable1;                                                                                                 // PIXEL WRITE ENABLE
-
-    pixel := tiles.rdata1; pix_visible := 0;                                                                                    // OUTPUT PIXEL COLOUR ( current pixel )
-
-    always {
-        uint2   STATE = uninitialised;
-
-        if( sprite_active & pix_active ) {
-            onehot( STATE ) {
-                case 0: {
-                    if( ( ~|y & sprite_y[10,1] & ~max_y[10,1] ) | ( { 1b0, y } == sprite_y ) ) { STATE = 2; }
-                }
-                case 1: {
-                    pix_visible = ( tiles.rdata1 != 64 ) & ( __signed( x ) >= __signed( sprite_x ) ) &                          // ARE WE IN THE SPRITE?
-                                                           ( __signed( x ) <  __signed( max_x ) );
-                }
+            if (pix_end) {
+                render_y = 0;
+                r_state  = 1;
+                copy_idx = 0;
+            } else {
+                r_state  = 2;
             }
         }
-
-        if( pix_end | ( { 1b0, y } == max_y ) ) { STATE = 1; }
     }
 }
 
@@ -321,10 +312,17 @@ unit sprite_memmap(
     simple_dualport_bram_port1 sprite_collision_memory,
     simple_dualport_bram_port1 sprite_layer_collision_memory
 ) <reginputs> {
-    uint11  writerpixel_NEXT <:: sprites.writerpixel + 1;
-    uint5   writerspritenumber = uninitialised;
+    uint16 writerpixel = 0;
 
-    sprite_layer sprites <@video_clock,!video_reset> (
+    dualport_bram uint8 tiles <@video_clock,@clock> [65536] = uninitialised;
+    dualport_bram uint18 line_buffer_0 <@video_clock,@video_clock> [640] = uninitialised;
+    dualport_bram uint18 line_buffer_1 <@video_clock,@video_clock> [640] = uninitialised;
+
+    // Grab the ping_pong signal dynamically
+    uint1 ping_pong <:: renderer.out_ping_pong;
+
+    // Instantiate Units
+    sprite_display display <@video_clock,!video_reset> (
         pix_x <: pix_x, pix_x1 <: pix_x1, pix_y <: pix_y, pix_end <: pix_end, pix_active <: pix_active,
         pixels :> pixels, sprite_display :> sprite_display,
 
@@ -336,8 +334,11 @@ unit sprite_memmap(
         collision_layer_5 <: collision_layer_5,
         collision_layer_6 <: collision_layer_6,
 
-        sprite_collision_memory <:> sprite_collision_memory,
-        sprite_layer_collision_memory <:> sprite_layer_collision_memory,
+        sprite_layer_collision_memory <:> sprite_layer_collision_memory
+    );
+
+    sprite_render renderer <@video_clock,!video_reset> (
+        pix_x <: pix_x, pix_y <: pix_y, pix_end <: pix_end,
 
         sprite_active <:> sprite_active,
         sprite_actions <:> sprite_actions,
@@ -345,19 +346,42 @@ unit sprite_memmap(
         sprite_tile <:> sprite_tile,
         sprite_x <:> sprite_x,
         sprite_y <:> sprite_y,
+        sprite_collision_memory <:> sprite_collision_memory,
 
-        WDATA <: WDATA
+        tiles <:> tiles
     );
 
+    // ----------------------------------------------------------------------
+    // BRAM MULTIPLEXER (Ping-Pong Routing) - COMBINATIONAL, OUTSIDE ALWAYS
+    // ----------------------------------------------------------------------
+    line_buffer_0.addr0    := display.lb_addr0;
+    line_buffer_1.addr0    := display.lb_addr0;
+
+    line_buffer_0.addr1    := ping_pong ? renderer.lb_addr1    : display.lb_addr1;
+    line_buffer_0.wdata1   := ping_pong ? renderer.lb_wdata1   : display.lb_wdata1;
+    line_buffer_0.wenable1 := ping_pong ? renderer.lb_wenable1 : display.lb_wenable1;
+
+    line_buffer_1.addr1    := ping_pong ? display.lb_addr1      : renderer.lb_addr1;
+    line_buffer_1.wdata1   := ping_pong ? display.lb_wdata1     : renderer.lb_wdata1;
+    line_buffer_1.wenable1 := ping_pong ? display.lb_wenable1   : renderer.lb_wenable1;
+
+    display.lb_rdata0 := ping_pong ? line_buffer_1.rdata0 : line_buffer_0.rdata0;
+    renderer.lb_rdata1 := ping_pong ? line_buffer_0.rdata1 : line_buffer_1.rdata1;
+
+    tiles.wenable1 := 0;
+
     always {
-        uint1   latch = uninitialised;
+        // CPU Write Tile Logic
+        tiles.wenable1 = 0; // Explicitly clear wenable
 
-        if( latch ) { latch = 0; } else { sprites.wenable1 = 0; }                                                               // LATCH WRITE FLAG FOR 50 -> 25MHz
-
-        if( bitmapwriter ) {                                                                                                    //  WRITE TO BITMAP?
-            switch( ADDR[1,1] ) {
-                case 0: { writerspritenumber = WDATA; sprites.writerpixel = -1; }
-                case 1: { sprites.wenable1[ writerspritenumber, 1 ] = 1; latch = 1; sprites.writerpixel = writerpixel_NEXT; }
+        if (bitmapwriter) {
+            if (ADDR[1,1] ) {
+                tiles.addr1 = writerpixel;
+                tiles.wdata1 = WDATA;
+                tiles.wenable1 = 1;
+                writerpixel = writerpixel + 1;
+            } else {
+                writerpixel = { WDATA, 8b00000000 };
             }
         }
     }

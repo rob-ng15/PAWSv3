@@ -58,7 +58,7 @@ unit cpu_registers(
     input   uint64              EXECUTE_LSA_RD,                                                                                 // INSTRUCTION IN LOAD/STORE/ATOMIC IS WRITING TO
 
     input   uint32              COMMIT_I_RD,                                                                                    // INSTRUCTION IN COMMIT I IS WRITING TO
-    input   uint64              COMMIT_F_RD                                                                                     // INSTRUCTION IN COMMIT F IS WRITING TO
+    input   uint32              COMMIT_F_RD                                                                                     // INSTRUCTION IN COMMIT F IS WRITING TO
 ) <reginputs> {
     uint3               STATE = 1;
 

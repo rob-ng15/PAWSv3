@@ -160,8 +160,8 @@ unit i2c_master(
     // I/O buffers for the I2C open-drain signals
     // Note that even if no slaves drive SCL, you need to use feedback
     // to sense the rising edge of SCL to be sure to meet hold time.
-    SCL.oenable := ~float_scl; SCL.o := float_scl;
-    SDA.oenable := ~float_sda; SDA.o := float_scl;
+    SCL.oenable := ~float_scl; SCL.o := 0;
+    SDA.oenable := ~float_sda; SDA.o := 0;
     status := { status_busy, status_anack, status_dnack, status_read, status_overrun, status_initialising, 18h0, status_data };
 
     // Bit definitions
@@ -192,14 +192,23 @@ unit i2c_master(
 
     algorithm <autorun> {
         while(1) {
-            if( wr_ctrl ) {
-                if( status_busy ) {
-                    // busy, set overrun flag on unsuccessful attempt to write ctrl_reg
-                    status_overrun = 1;
+            // request-to-read pulse
+            if( slow[ $c_slow_bits$, 1 ] ) {
+                // cycle to registers
+                prev_reg_addr = reg_addr; // Fixed: Save state before modifying
+
+                if( reg_addr == 0 ) {
+                    reg_addr = 6;
                 } else {
-                    // not busy, clear overrun flag on successful write to ctrl_reg
-                    ctrl_reg = ctrl_data;
-                    status_overrun = 0;
+                    reg_addr = reg_addr - 1;
+                }
+
+                wr_cycle = 0;
+            } else {
+                if( wr ) {
+                    wr_cycle = ( addr != 7 );
+                    r_addr_wr = addr;
+                    r_data_wr = data;
                 }
             }
         }
@@ -310,7 +319,6 @@ unit i2c_master(
                 // sample SDA and move on
                 float_scl = 1;
                 if( scl ) {
-                    bit_count = bit_count + 1;
                     if( bit_count == 8 ) {
                         // Address ACK cycle
                         // SDA should be driven low for slave ACK
@@ -330,11 +338,13 @@ unit i2c_master(
                         state = $spin$;
                     } else {
                         // shift data in, MSB first
-                        if( bit_count == 17 ) { read_data = { read_data[ 0, 7 ], sda }; }
+                        if( bit_count != 17 ) { read_data = { read_data[ 0, 7 ], sda }; } // Fixed: != 17
                         timer = $t_high$; // 4.0us from spec, but use 5.0 instead to meet cycle time
                         rtn_state = $clock_low$;
                         state = $spin$;
                     }
+                    // Increment bit_count LAST to mimic Verilog's non-blocking assignment
+                    bit_count = bit_count + 1;
                 }
             }
             case $stop$: {

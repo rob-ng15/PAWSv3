@@ -15,8 +15,7 @@ unit background_display(
     uint12  rand_x = 0;                                                                                                         // PSEUDO RANDOM NUMBER GENERATOR
     uint10  dotpos <:: ( frame >> rand_x[10,2] ) + rand_x;
 
-    brom uint8 rainbow[8] = { 8h80, 8hc1, 8he1, 8hf9, 8h38, 8h0f, 8h45, 8ha7 }; rainbow.addr := pix_y[6,3];                     // RAINBOW DKRED RED ORANGE YELLOW GREEN BLUE DKPURPLE VIOLET
-
+    brom uint8 rainbow[8] = { 8h80, 8hc1, 8he1, 8hf9, 8h38, 8h0f, 8h45, 8ha7 }; rainbow.addr := pix_y[6,3];                     // RAINBOW COLOURS
     frame := frame + pix_end;                                                                                                   // INCREMENT AT END OF FRAME
     rand_x := |pix_x ? rand_x * 31421 + 6927 : 1;
 
@@ -40,8 +39,8 @@ unit background_display(
             case 15: { pixel = pix_y[0,1] ? b_colour : b_alt; }                                                                 //  HSTRIPES
         }
 
-        if( pix_x == 319 ) { lefthalf = 0; } else { if ( ~|pix_x ) { lefthalf = 1; } }
-        if( pix_y == 239 ) { tophalf = 0; } else { if ( ~|pix_y ) { tophalf = 1; } }
+        if( pix_x == 319 ) { lefthalf = 0; } else { if ( ~|pix_x ) { lefthalf = 1; } }                                          // DETECT LEFTHALF
+        if( pix_y == 239 ) { tophalf = 0; } else { if ( ~|pix_y ) { tophalf = 1; } }                                            // DETECT TOPHALF
     }
 }
 
@@ -54,9 +53,12 @@ bitfield p_nucu{
 }
 
 unit nucu(
+    input   uint1   video_phase,
+
     input   uint10  pix_x,
     input   uint9   pix_y,
     input   uint1   pix_vblank,
+    input   uint1   pix_end,
 
     input   uint4   backgroundcolour_mode,                                                                                      // FROM CPU BACKGROUND MODE
     input   uint8   backgroundcolour,                                                                                           // FROM CPU BACKGROUND COLOUR
@@ -72,99 +74,166 @@ unit nucu(
     output  uint8   BACKGROUNDalt,                                                                                              // COPPER/CPU BACKGROUND COLOUR ALT TO GENERATOR
 
     simple_dualport_bram_port0  PROG,                                                                                           // PROGRAM { OP, OPD, OPF, OPL }
-    input   uint$NUCUmem*10$  memoryinit,                                                                                       // INITIAL SETTINGS OF THE MEMORY
-    output  uint$NUCUmem*10$  MEM                                                                                               // STORAGE FOR NUCUmem MEMORY LOCATIONS
+    dualport_bram_port0 NUCU_MEM                                                                                                // MEMORY
 ) <reginputs> {
     uint$NUCUaddr$   PC_p1 <:: PROG.addr0 + 1;                                                                                  // NEXT INSTRUCTION
     uint$NUCUaddr$   PC_p2 <:: PROG.addr0 + 2;                                                                                  // NEXT INSTRUCTION IF SKIP
 
-    uint10  REGS[4] = uninitialised;                                                                                            // STORAGE FOR 4 REGISTERS
-    uint10  reg1 <:: ( p_nucu( PROG.rdata0 ).opd == 0 ) ? pix_vblank :                                                          // REG1 <-  VBLANK              OPERATION INPUT 1
-                     ( p_nucu( PROG.rdata0 ).opd == 1 ) ? pix_x :                                                               //          X
-                     ( p_nucu( PROG.rdata0 ).opd == 2 ) ? pix_y :                                                               //          Y
-                     ( p_nucu( PROG.rdata0 ).opd == 3 ) ? copper_cpu_input :                                                    //          CPU_INPUT
-                                                          REGS[ p_nucu( PROG.rdata0 ).opd[0,2] ];                               //          REG[]
-    uint10  reg2 <:: ( p_nucu( PROG.rdata0 ).op == 0 ) & ( p_nucu( PROG.rdata0 ).opd == 2 ) ? rstack.rdata :                    // REG2 <-  RETURN STACK        OPERATION INPUT 2
-                                                                  p_nucu( PROG.rdata0 ).opf ? p_nucu( PROG.rdata0 ).opl :       //          LITERAL
-                                                         ( p_nucu( PROG.rdata0 ).opl == 0 ) ? pix_vblank :                      //          VBLANK
-                                                         ( p_nucu( PROG.rdata0 ).opl == 1 ) ? pix_x :                           //          X
-                                                         ( p_nucu( PROG.rdata0 ).opl == 2 ) ? pix_y :                           //          Y
-                                                         ( p_nucu( PROG.rdata0 ).opl == 3 ) ? copper_cpu_input :                //          CPU_INPUT
-                                                                                              REGS[ p_nucu( PROG.rdata0 ).opl[0,2] ];  //    REG[]
-    uint1   eq <:: ( reg1 == reg2 );
-    uint1   lt <:: ( reg1 < reg2 );
-
     bram uint10 dstack[$NUCUstack$] = uninitialised;                                                                            // DATA STACK
     bram uint$NUCUaddr$ rstack[$NUCUstack$] = uninitialised;                                                                    // RETURN STACK
+    uint$NUCUstackaddr$ dstack_p1 <:: dstack.addr + 1;
+    uint$NUCUstackaddr$ dstack_m1 <:: dstack.addr - 1;
+    uint$NUCUstackaddr$ rstack_p1 <:: rstack.addr + 1;
+    uint$NUCUstackaddr$ rstack_m1 <:: rstack.addr - 1;
 
     dstack.wenable := 0; rstack.wenable := 0; rstack.wdata := PC_p1;
+    NUCU_MEM.wenable0 := 0;
 
     always {
-        uint2   PCinc = 0;                                                                                                      // PC ACTION FLAG == 0 PCnext, == 1 PCskip, == 2 REG2 value
-        uint1   WR = 1;                                                                                                         // WRITE TO REGISTERS FLAG
-        uint1   WM = 0;                                                                                                         // WRITE TO MEMORY FLAG
-
+        uint10  REGS[4] = uninitialised;                                                                                        // STORAGE FOR 4 REGISTERS
+        uint10  reg1 = uninitialised;
+        uint10  reg2 = uninitialised;
+        uint1   eq = uninitialised;
+        uint1   lt = uninitialised;
         uint10  result = uninitialised;                                                                                         // RESULT OF OP
+
+        uint2   PCinc = 0;                                                                                                      // PC ACTION FLAG == 0 PCnext, == 1 PCskip, == 2 REG2 value
+        uint1   STALL = 0;
+        uint1   WR = 1;                                                                                                         // WRITE TO REGISTERS FLAG
+
+        uint1   SYNC = uninitialised;
+        uint1   STATE = uninitialised;
 
         switch( copper_status ) {                                                                                               // CU STOPPED
             case 0: {
                 PROG.addr0 = 0;                                                                                                 // set PC to 0
-                MEM = memoryinit;                                                                                               // COPY CPU MEMORY INITIALISATION VALUES
                 dstack.addr = -1; rstack.addr = -1;                                                                             // SET DEFAULT STACK ADDRESSES
 
                 BACKGROUNDmode = backgroundcolour_mode;                                                                         // UPDATE THE BACKGROUND GENERATOR FROM THE CPU
                 BACKGROUNDcolour = backgroundcolour;
                 BACKGROUNDalt = backgroundcolour_alt;
+
+                SYNC = 0; STATE = 0;
             }
             case 1: {                                                                                                           // CU RUNNING
-                switch( p_nucu( PROG.rdata0 ).op ) {
-                    case 4h0: {                                                                                                 // JMP JSR RET SLI SRx LRx
-                        WR = p_nucu( PROG.rdata0 ).opd[2,1]; result = dstack.rdata;                                             // WRITE TO REGISTER IF LRx, RESULT IS TOP OF DSTACK
-                        switch( p_nucu( PROG.rdata0 ).opd ) {                                                                   // reg1 acts as switch
-                            case 0: { PCinc = 2; }                                                                              // Jump JP( L literal, R register value )
-                            case 1: {                                                                                           // Jump subroutine JS( L literal, R register value )
-                                rstack.addr = rstack.addr + 1;  rstack.wenable = 1; PCinc = 2;                                  //  SAVE NEXT ADDRESS TO RSTACK
+                if( SYNC ) { switch( STATE ) {
+                    case 0: {
+                        switch( p_nucu( PROG.rdata0 ).opd ) {                                                                   // SET reg1
+                            case 0: { reg1 = pix_vblank; }                                                                      //      RB ( VBLANK )
+                            case 1: { reg1 = pix_x; }                                                                           //      RX
+                            case 2: { reg1 = pix_y; }                                                                           //      RY
+                            case 3: { reg1 = copper_cpu_input; }                                                                //      RC
+                            default: { reg1 = REGS[ p_nucu( PROG.rdata0 ).opd[0,2] ]; }                                         //      R[0..3]
+                        }
+
+                        if( ( p_nucu( PROG.rdata0 ).op == 0 ) & ( p_nucu( PROG.rdata0 ).opd == 2 ) ) {                          // SET reg2
+                            reg2 = rstack.rdata;                                                                                //      RETURN ADDRESS ( for RET )
+                        } else {
+                            if( p_nucu( PROG.rdata0 ).opf ) {
+                                switch( p_nucu( PROG.rdata0 ).op ) {                                                            //      LITERAL or TOP BIT STRIPPED FROM LITERAL
+                                    case 4h8: { reg2 = p_nucu( PROG.rdata0 ).opl & 10h1ff; }
+                                    case 4hd: { reg2 = p_nucu( PROG.rdata0 ).opl & 10h1ff; }
+                                    default: { reg2 = p_nucu( PROG.rdata0 ).opl; }
+                                }
+                            } else {
+                                switch( p_nucu( PROG.rdata0 ).opl[0,4] ) {
+                                    case 0: { reg2 = pix_vblank; }                                                              //      RB ( VBLANK )
+                                    case 1: { reg2 = pix_x; }                                                                   //      RX
+                                    case 2: { reg2 = pix_y; }                                                                   //      RY
+                                    case 3: { reg2 = copper_cpu_input; }                                                        //      RC
+                                    case 8: { reg2 = staticGenerator; }                                                         //      RNG
+                                    default: { reg2 = REGS[ p_nucu( PROG.rdata0 ).opl[0,2] ]; }                                 //      R[0..3]
+                                }
                             }
-                            case 2: { rstack.addr = rstack.addr - 1; PCinc = 2; }                                               // RET ( pop address from rstack )
-                            case 3: { dstack.addr = dstack.addr + 1; dstack.wdata = reg2; dstack.wenable = 1; }                 // SLI and SRx ( push literal or register value on dstack )
-                            default: { dstack.addr = dstack.addr - 1; }                                                         // LRx ( pop value from dstack, write to reg1 )
                         }
+
+                        NUCU_MEM.addr0 = reg2;                                                                                  // SET MEMORY ADDRESS TO reg2
                     }
-                    default: {                                                                                                  // ALU OPERATIONS
+
+                    case 1: {
+                        eq = ( reg1 == reg2 );
+                        lt = reg1 < reg2;
+
                         switch( p_nucu( PROG.rdata0 ).op ) {
-                            default: {}
-                            case 4h1: { result = reg2; }                                                                                    // SET
-                            case 4h2: { result = reg1 + reg2; }                                                                             // ADD
-                            case 4h3: { result = reg1 - reg2; }                                                                             // SUB
-                            case 4h4: { result = reg1 & reg2; }                                                                             // AND
-                            case 4h5: { result = reg1 | reg2; }                                                                             // OR
-                            case 4h6: { result = reg1 ^ reg2; }                                                                             // XOR
-                            case 4h7: { result = reg1 << reg2; }                                                                            // SHL
-                            case 4h8: { result = reg1 >> reg2; }                                                                            // SHR
+                            case 4h0: {                                                                                         // JMP JSR RET SLI SRx LRx
+                                WR = p_nucu( PROG.rdata0 ).opd[2,1]; result = dstack.rdata;                                     // WRITE TO REGISTER IF LRx, RESULT IS TOP OF DSTACK
+                                switch( p_nucu( PROG.rdata0 ).opd ) {                                                           // reg1 acts as switch
+                                    case 0: { PCinc = 2; }                                                                      // Jump JP( L literal, R register value )
+                                    case 1: {                                                                                   // Jump subroutine JS( L literal, R register value )
+                                        rstack.addr = rstack_p1;  rstack.wenable = 1; PCinc = 2;                          //      SAVE NEXT ADDRESS TO RSTACK
+                                    }
+                                    case 2: { rstack.addr = rstack_m1; PCinc = 2; }                                       // RET ( pop address from rstack )
+                                    case 3: { dstack.addr = dstack_p1; dstack.wdata = reg2; dstack.wenable = 1; }         // SLI and SRx ( push literal or register value on dstack )
+                                    case 4: {                                                                                   // WAITACTIVE OR LR0 ( POP FROM DSTACK )
+                                        if( p_nucu( PROG.rdata0 ).opf ) {
+                                            STALL = pix_vblank; WR = 0;
+                                        } else {
+                                            dstack.addr = dstack_m1;
+                                        }
+                                    }
+                                    case 5: {                                                                                   // WAITY OR LR1 ( POP FROM DSTACK )
+                                        if( p_nucu( PROG.rdata0 ).opf ) {
+                                            STALL = ( pix_y < p_nucu( PROG.rdata0 ).opl ); WR = 0;
+                                        } else {
+                                            dstack.addr = dstack_m1;
+                                        }
+                                    }
+                                    case 6: {                                                                                   // WAITX OR LR2 ( POP FROM DSTACK )
+                                        if( p_nucu( PROG.rdata0 ).opf ) {
+                                            STALL = ( { 1b0, pix_x } < p_nucu( PROG.rdata0 ).opl ); WR = 0;
+                                        }
+                                        else {
+                                            dstack.addr = dstack_m1;
+                                        }
+                                    }
+                                    case 7: {                                                                                   // WAITVB OR LR3 ( POP FROM DSTACK )
+                                        if( p_nucu( PROG.rdata0 ).opf) {
+                                            STALL = ~pix_vblank; WR = 0;
+                                        } else {
+                                            dstack.addr = dstack_m1;
+                                        }
+                                    }
+                                }
+                            }
+                            default: {                                                                                          // ALU OPERATIONS
+                                switch( p_nucu( PROG.rdata0 ).op ) {
+                                    default: {}
+                                    case 4h1: { result = reg2; }                                                                // SET
+                                    case 4h2: { result = reg1 + reg2; }                                                         // ADD
+                                    case 4h3: { result = reg1 - reg2; }                                                         // SUB
+                                    case 4h4: { result = reg1 & reg2; }                                                         // AND
+                                    case 4h5: { result = reg1 | reg2; }                                                         // OR
+                                    case 4h6: { result = reg1 ^ reg2; }                                                         // XOR
+                                    case 4h7: { result = reg1 * reg2; }                                                         // MUL
+                                    case 4h8: { result = p_nucu( PROG.rdata0 ).opl[9,1] ? ( reg1 << reg2 ) : ( reg1 >> reg2 ); } // SHR / SHL
+                                }
+                            }
+                            case 4h9: { WR = 0; PCinc = p_nucu( PROG.rdata0 ).opd[2,1] ^ eq; }                                  // SKIP = / !=
+                            case 4ha: { result = reg2[9,1] ? ( ~reg2 + 1 ) : reg2; }                                            // ABS
+                            case 4hb: { WR = 0; PCinc = p_nucu( PROG.rdata0 ).opd[2,1] ^ lt; }                                  // SLT (0) / SGE (1)
+                            case 4hc: { WR = 0; PCinc = p_nucu( PROG.rdata0 ).opd[2,1] ^ ( lt | eq ); }                         // SLE (0) / SGT (1)
+                            case 4hd: {                                                                                         // MIN / MAX
+                                result = ( ~lt ^ p_nucu( PROG.rdata0 ).opl[9,1] ) ? reg2 : reg1;
+                            }
+                            case 4he: { result = NUCU_MEM.rdata0; }                                                             // LOAD FROM MEMORY
+                            case 4hf: { WR = 0; NUCU_MEM.wdata0 = reg1; NUCU_MEM.wenable0 = 1; }                                // STORE TO MEMORY
                         }
+
+                        if( WR ) {                                                                                              // WRITE TO REGISTERS?
+                            switch( p_nucu( PROG.rdata0 ).opd ) {
+                                case 0: { BACKGROUNDmode = result; }                                                            // BACKGROUND MODE
+                                case 1: { BACKGROUNDcolour = result; }                                                          // BACKGROUND COLOUR
+                                case 2: { BACKGROUNDalt = result; }                                                             // BACKGROUND COLOUR ALT
+                                case 3: { copper_cpu_output = result; }                                                         // COPPER TO CPU
+                                default: { REGS[ p_nucu( PROG.rdata0 ).opd[0,2] ] = result; }                                   // COPPER REGISTER
+                            }
+                        }
+
+                        PROG.addr0 = STALL ? PROG.addr0 : PCinc[1,1] ? reg2 : PCinc[0,1] ? PC_p2 : PC_p1;                       // UPDATE PC, PCinc == 2 JUMP, == 1 SKIP, == 0 NEXT
                     }
-                    case 4h9: { WR = 0; PCinc = eq; }                                                                           // SKIP =
-                    case 4ha: { WR = 0; PCinc = ~eq; }                                                                          // SKIP !=
-                    case 4hb: { WR = 0; PCinc = lt; }                                                                           // SKIP <
-                    case 4hc: { WR = 0; PCinc = ( lt | eq ); }                                                                  // SKIP <=
-                    case 4hd: { result = staticGenerator & reg2; }                                                              // RANDOM
-                    case 4he: { result = MEM[ reg2[0,$NUCUmemaddr$] * 10, 10 ]; }                                               // LOAD FROM MEMORY
-                    case 4hf: { WR = 0; WM = 1; }                                                                               // STORE TO MEMORY
-                }
+                } STATE = ~STATE; }
 
-                if( WR ) {                                                                                                      // WRITE TO REGISTERS?
-                    switch( p_nucu( PROG.rdata0 ).opd ) {
-                        case 0: { BACKGROUNDmode = result; }                                                                    // BACKGROUND MODE
-                        case 1: { BACKGROUNDcolour = result; }                                                                  // BACKGROUND COLOUR
-                        case 2: { BACKGROUNDalt = result; }                                                                     // BACKGROUND COLOUR ALT
-                        case 3: { copper_cpu_output = result; }                                                                 // COPPER TO CPU
-                        default: { REGS[ p_nucu( PROG.rdata0 ).opd[0,2] ] = result; }                                           // COPPER REGISTER
-                    }
-                }
-
-                if( WM ) { MEM[ reg2[0,$NUCUmemaddr$] * 10, 10 ] = reg1[0,10]; }                                                // WRITE TO MEMORY
-
-                PROG.addr0 = PCinc[1,1] ? reg2 : PCinc[0,1] ? PC_p2 : PC_p1;                                                    // UPDATE PC, PCinc == 2 JUMP, == 1 SKIP, == 0 NEXT
+                if( ~SYNC & pix_end & video_phase ) { SYNC = 1; }
             }
         }
     }
@@ -191,8 +260,6 @@ unit background_memmap(
     input   uint2   colourmode,
     input   uint10  staticGenerator
 ) <reginputs> {
-    simple_dualport_bram uint18 PROG <@video_clock,@clock> [ $NUCUblocks$ ] = uninitialised;                                   // BACKGROUND   PROGRAM STORAGE { op, opd, opf, opl }
-
     // BACKGROUND GENERATOR
     background_display BACKGROUND <@video_clock,!video_reset> (
         pix_x <: pix_x,
@@ -205,42 +272,39 @@ unit background_memmap(
         b_mode <: BACKGROUND_COPPER.BACKGROUNDmode,
         colourmode <: colourmode
     );
-    nucu BACKGROUND_COPPER <@video_clock,!video_reset> (
+
+    simple_dualport_bram uint18 PROG[ $NUCUblocks$ ] = uninitialised;                                                           // BACKGROUND   PROGRAM STORAGE { op, opd, opf, opl }
+    dualport_bram uint10 NUCU_MEM[$NUCUmem$] = uninitialized;                                                                   //              MEMORY BLOCK
+    nucu BACKGROUND_COPPER(
+        video_phase <: video_clock,
         pix_x <: pix_x,
         pix_y <: pix_y,
         pix_vblank <: pix_vblank,
+        pix_end <: pix_end,
         staticGenerator <: staticGenerator,
-        PROG <:> PROG
+        PROG <:> PROG,
+        NUCU_MEM <:> NUCU_MEM
     );
 
-    uint3   mempos = uninitialised;
-    uint3   mempos_NEXT <:: mempos + 1;
-
-    PROG.wenable1 := WENABLE & ( ADDR[1,5] == 5h5 );
+    PROG.wenable1 := 0;
+    NUCU_MEM.wenable1 := 0; NUCU_MEM.wdata1 := WDATA;
 
     always {
         if( WENABLE ) {
-            if( ADDR[5,1] ) {
-                BACKGROUND_COPPER.memoryinit[ ADDR[1,3] * 10, 10 ] = WDATA;                                                     // SET AN INDIVIDUAL CU MEMORY LOCATION
-            } else {
-                switch( ADDR[1,4] ) {
-                    case 4h0: { BACKGROUND_COPPER.backgroundcolour = WDATA; }                                                   // CPU SET  BACKGROUND COLOUR
-                    case 4h1: { BACKGROUND_COPPER.backgroundcolour_alt = WDATA; }                                               //          BACKGROUND COLOUR ALT
-                    case 4h2: { BACKGROUND_COPPER.backgroundcolour_mode = WDATA; }                                              //          BACKGROUND MODE
-                    case 4h3: { BACKGROUND_COPPER.copper_status = WDATA; }                                                      // START/STOP CU
-                    case 4h4: { BACKGROUND_COPPER.copper_cpu_input = WDATA; }                                                   // SET RISCV->CU CPU REGISTER VALUE
-                    case 4h6: { PROG.addr1 = WDATA; }                                                                           // SET CU PROGRAM ADDRESS
-                    case 4h8: { PROG.wdata1 = WDATA; }                                                                          // SET CU PROGRAM INSTRUCTION
-                    case 4hb: { mempos = 0; }                                                                                   // START BLOCK WRITE OF CU MEMORY
-                    case 4hc: { BACKGROUND_COPPER.memoryinit[ mempos * 10, 10 ] = WDATA; mempos = mempos_NEXT; }                // WRITE NEXT CU MEMORY LOCATION
-                    default: {}
-                }
+            switch( ADDR[1,4] ) {
+                case 4h0: { BACKGROUND_COPPER.backgroundcolour = WDATA; }                                                   // CPU SET  BACKGROUND COLOUR
+                case 4h1: { BACKGROUND_COPPER.backgroundcolour_alt = WDATA; }                                               //          BACKGROUND COLOUR ALT
+                case 4h2: { BACKGROUND_COPPER.backgroundcolour_mode = WDATA; }                                              //          BACKGROUND MODE
+                case 4h3: { BACKGROUND_COPPER.copper_status = WDATA; }                                                      // START/STOP CU
+                case 4h4: { BACKGROUND_COPPER.copper_cpu_input = WDATA; }                                                   // SET RISCV->CU CPU REGISTER VALUE
+                case 4h6: { PROG.addr1 = WDATA; }                                                                           // SET CU PROGRAM ADDRESS
+                case 4h8: { PROG.wdata1 = WDATA; PROG.wenable1 = 1; }                                                       // SET CU PROGRAM INSTRUCTION
+                case 4hb: { NUCU_MEM.addr1 = WDATA; }                                                                       // SET ADDRESS OF CU MEMORY
+                case 4hc: { NUCU_MEM.wenable1 = 1; }                                                                        // WRITE TO CU MEMORY LOCATION
+                default: {}
             }
         }
 
-        switch( ADDR[5,1] ) {
-            case 1b0: { RDATA = BACKGROUND_COPPER.copper_cpu_output; }                                                          // READ CU->RISCV REGISTER VALUE
-            case 1b1: { RDATA = BACKGROUND_COPPER.MEM[ ADDR[1,3] * 10, 10 ]; }                                                  // READ AN INDIVIDUAL CU MEMORY LOCATION
-        }
+        RDATA = ADDR[4,1] ? NUCU_MEM.rdata1 : BACKGROUND_COPPER.copper_cpu_output;                                          // READ CU MEMORY OR CU->RISCV REGISTER VALUE
     }
 }

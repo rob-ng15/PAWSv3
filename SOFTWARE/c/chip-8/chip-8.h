@@ -12,7 +12,7 @@ enum SPEEDS { MAX, VIP, CYCLE };
 #define ADDRESS(x,y) ( ( x + y ) )
 
 // MACRO TO FETCH TWO BYTES AND COMBINE TO ONE HALF-WORD
-#define FETCH(x) ( machine.MEMORY[ ADDRESS(x,0) ] << 8 ) | machine.MEMORY[ ADDRESS(x,1) ]
+#define FETCH(x) ( ( machine.MEMORY[ ADDRESS(x,0) ] << 8 ) | machine.MEMORY[ ADDRESS(x,1) ] )
 
 // NUMBER OF BYTES IN THE DISPLAY BUFFER UNSIGNED LONG * 2 PER ROW * 64 ROWS * 2 BUFFERS
 #define PLANESIZE 8 * 2 * 64

@@ -12,7 +12,7 @@ LD=$(ARCH)-elf-ld.bfd
 NM=$(ARCH)--elf-nm
 RANLIB=$(ARCH)--elf-ranlib
 
-GCCVER=15.2.0
+GCCVER=16.2.0
 COMPILER=$(CC)
 
 BUILD_DIR=build_lto

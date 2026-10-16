@@ -239,7 +239,6 @@ unit audio_$i$(
         audio_output :> audio_wave
     );
 
-    apu_processor.apu_write := 0;
     frequency_table.addr0 := frequency; frequency_table.addr1 := samples.rdata0;
 
     always {
@@ -247,10 +246,12 @@ unit audio_$i$(
         uint1   REPEAT = uninitialised;                                                                                         // IS REPEAT FOR DOOM PC SPEAKER MODE RQQUIRED?
         uint1   newS = uninitialised;                                                                                           // IS A NEW NOTE REQUIRED WHEN AUDIO STOPS?
 
+        apu_processor.apu_write = ( SAMPLEMODE ? ( ~apu_processor.audio_active & newS ) : 0 ) | ( apu_write & ~waveform[3,1] );
+
         if( SAMPLEMODE ) {                                                                                                      // DOOM PC SPEAKER MODE?
             if( ~apu_processor.audio_active ) {                                                                                 //  PREVIOUS SAMPLE FINISHED?
                 if( newS ) {                                                                                                    //  NEW SAMPLE NEEDED?
-                    apu_processor.frequency = frequency_table.rdata1; apu_processor.apu_write = 1; newS = 0;                    //  SEND NEW NOTE
+                    apu_processor.frequency = frequency_table.rdata1; newS = 0;                                                 //  SEND NEW NOTE
                     if( SAMP0P1 == samples_MAX ) {                                                                              // AT END OF NOTES?
                         samples.addr0 = 0; SAMPLEMODE = REPEAT;                                                                 //  RESTART IF REPEAT
                     } else {
@@ -267,33 +268,8 @@ unit audio_$i$(
             SAMPLEMODE = waveform[3,1]; REPEAT = waveform[4,1];                                                                 // SET DOOM PC SPEAKER SAMPLE MODE AND REPEAT FLAGS
             samples.addr0 = 0; newS = 1;                                                                                        // RESET DOOM PC SPEAKER SAMPLE MODE, MOVE TO START
             if( ~waveform[3,1] ) {
-                apu_processor.frequency = frequency_table.rdata0; apu_processor.apu_write = 1;                                  // NORMAL WAVEFORM MODE, SET FREQUENCY
+                apu_processor.frequency = frequency_table.rdata0;                                                               // NORMAL WAVEFORM MODE, SET FREQUENCY
             }
-        }
-    }
-}
-
-unit audiocounter(
-    input   uint1           PULSE_1KHZ,
-    input   uint1           start,
-    input   uint13          selected_frequency,
-    input   uint16          selected_duration,
-    output  uint1           updatepoint,
-    output  uint1           active
-) <reginputs> {
-    uint13              counter50mhz = uninitialised;
-    uint13              counter50mhz_NEXT <:: counter50mhz - 1;
-    uint16              duration = uninitialised;
-    uint16              duration_NEXT <:: duration - 1;
-
-    active := |duration; updatepoint := |duration & ~|counter50mhz;
-
-    always {
-        if( start ) {
-            counter50mhz = 0; duration = selected_duration;
-        } else {
-            if( updatepoint ) { counter50mhz = selected_frequency; } else { counter50mhz = counter50mhz_NEXT; }
-            if( active & PULSE_1KHZ ) { duration = duration_NEXT; }
         }
     }
 }
@@ -323,7 +299,7 @@ unit apu_$i$(                                                                   
     audiocounter COUNTER( PULSE_1KHZ <: PULSE_1KHZ, selected_frequency <: frequency, selected_duration <: duration, start <: apu_write, active :> audio_active );
 
     always {
-        if( COUNTER.updatepoint ) { audio_output = ( WAVEFORM.audio_output * ( 8 - ~volume ) ) >> 3; }
+        if( COUNTER.updatepoint ) { audio_output = ( WAVEFORM.audio_output * ( volume + 1 ) ) >> 3; }
     }
 }
 
@@ -340,27 +316,51 @@ unit waveform_$i$(
 ) <reginputs> {
     uint8               point = uninitialised;
     uint8               point_NEXT <:: point + update;
-    uint8               TRIANGLE <:: ( point[7,1] ? ~{ point[0,7], 1b1 } : { point[0,7], 1b0 } );
+    uint7               TRIANGLE <:: ( point[7,1] ? ~point[0,7] : point[0,7] );
     uint9               HARMONIC <:: ( sine.rdata$i$ + TRIANGLE );
 
     sine.addr$i$ := point[0,8]; harmonic.addr$i$ := point[0,8];                                                                 // POINTER INTO HARMONIC AND SINE TABLES
     bit_samples.addr0 := point;                                                                                                 // POINTERS INTO BITSAMPLES
-    point := active ? point_NEXT : 0;                                                                                           // WAVEFORM POINT ONLY RESETS WHEN AUDIO GOES INACTIVE
-                                                                                                                                //  ALLOWS BIT SAMPLES TO REPEAT
+
     always {
         switch( selected_waveform ) {
             case 0: { audio_output = point[7,1] ? 255 : 127; }                                                                  // SQUARE
             case 1: { audio_output = point[0,8]; }                                                                              // SAWTOOTH
-            case 2: { audio_output = TRIANGLE; }                                                                                // TRIANGLE
+            case 2: { audio_output = { TRIANGLE, 1b0 }; }                                                                       // TRIANGLE
             case 3: { audio_output = sine.rdata$i$; }                                                                           // SINE
             case 4: { audio_output = staticGenerator; }                                                                         // NOISE
             case 5: { audio_output = harmonic.rdata$i$; }                                                                       // HARMONIC WAVE
-            case 6: { audio_output = HARMONIC[1,8]; }                                                       // HARMONIC TRIANGLE + SINE ( replaces old sample waveform )
+            case 6: { audio_output = HARMONIC[1,8]; }                                                                           // HARMONIC TRIANGLE + SINE ( replaces old sample waveform )
             case 7: { audio_output = { bit_samples.rdata0, $8 - AUDIO_bits$b0 }; }                                              // BIT SAMPLES
         }
+
+        point = active ? point_NEXT : 0;                                                                                        // WAVEFORM POINT ONLY RESETS WHEN AUDIO GOES INACTIVE
+                                                                                                                                //  ALLOWS BIT SAMPLES TO REPEAT
     }
 }
 $$ end
+
+unit audiocounter(
+    input   uint1           PULSE_1KHZ,
+    input   uint1           start,
+    input   uint13          selected_frequency,
+    input   uint16          selected_duration,
+    output  uint1           updatepoint,
+    output  uint1           active
+) <reginputs> {
+    uint13              counter50mhz = uninitialised;
+    uint13              counter50mhz_NEXT <:: counter50mhz - 1;
+    uint16              duration = uninitialised;
+    uint16              duration_NEXT <:: duration - 1;
+    uint1               IS_ACTIVE <:: |duration;
+
+    active := IS_ACTIVE; updatepoint := IS_ACTIVE & ~|counter50mhz;
+
+    always {
+        counter50mhz = start ? 0 : updatepoint ? selected_frequency : counter50mhz_NEXT;
+        duration = start ? selected_duration : ( active & PULSE_1KHZ ) ? duration_NEXT : duration;
+    }
+}
 
 // HANDLE WRITING TO THE DOOM PC SPEAKER SAMPLES MEMORY
 unit doom_samples_writer(
@@ -411,30 +411,31 @@ unit audio_pwm(
     input   uint8               wave_4,
     output  uint4               pwm
 ) <reginputs> {
-    uint10              MULT[8] = { 0, 1, 85, 1, 1, 205, 85, 585 };
-    uint3               active <:: active_1 + active_2 + active_3 + active_4;
-
-    uint16              samples <:: ( ( active_1 ? wave_1 : 0 ) +
-                                      ( active_2 ? wave_2 : 0 ) +
-                                      ( active_3 ? wave_3 : 0 ) +
-                                      ( active_4 ? wave_4 : 0 ) ) * MULT[active];
-
     always {
-        uint8           sample = uninitialised;
+        uint3               active = uninitialised;
+        uint11              samples = uninitialised;
+        uint8               sample = uninitialised;
 
-        pwm = sample[4,4] + ( RDTIME[0,4] < sample[0,4] );
-
-        switch( active ) {
-            default: { sample = 0; }
-            case 1: { sample = samples; }
-            case 2: { sample = samples[1,8]; }
-            case 3: { sample = samples[8,8]; }
-            case 4: { sample = samples[2,8];}
-            //            case 5: { sample = ( samples * 205 ) >> 11; }
-            //            case 6: { sample = ( samples * 85 ) >> 9; }
-            //            case 7: { sample = ( samples * 585 ) >> 12; }
+        {
+            active = active_1 + active_2 + active_3 + active_4;
+        } -> {
+            samples = ( ( active_1 ? wave_1 : 0 ) +
+                        ( active_2 ? wave_2 : 0 ) +
+                        ( active_3 ? wave_3 : 0 ) +
+                        ( active_4 ? wave_4 : 0 ) );
+        } -> {
+            switch( active ) {
+                default: { sample = 0; }
+                case 1: { sample = samples; }
+                case 2: { sample = samples[1,8]; }
+                case 3: { sample = ( samples* 85 ) >> 8; }
+                case 4: { sample = samples[2,8];}
+                //            case 5: { sample = ( samples * 205 ) >> 11; }
+                //            case 6: { sample = ( samples * 85 ) >> 9; }
+                //            case 7: { sample = ( samples * 585 ) >> 12; }
+            }
+        } -> {
+            pwm = sample[4,4] + ( RDTIME[0,4] < sample[0,4] );
         }
-
-
     }
 }

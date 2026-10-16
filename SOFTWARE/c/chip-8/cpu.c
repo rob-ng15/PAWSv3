@@ -333,8 +333,6 @@ void opcode_0( uint16_t instruction ) {
                             break;
                     }
                     DEBUG("scroll(U by %x)",N );
-                } else {
-                    machine.crashed = INVALIDINSN;
                 }
             }
             break;

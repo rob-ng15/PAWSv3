@@ -12,7 +12,7 @@ LD=$(ARCH)-elf-ld.bfd
 NM=$(ARCH)--elf-nm
 RANLIB=$(ARCH)--elf-ranlib
 
-GCCVER=15.2.0
+GCCVER=16.2.0
 COMPILER=$(CC)
 
 BUILD_DIR=build
@@ -30,7 +30,7 @@ ifndef OPTLEVEL
 OPTLEVEL=2
 endif
 
-CPUOPTS=-march=rv64gc_zba_zbb_zbs_zbkb_zbkx_zfa_zfh_zifencei_zicsr -mabi=lp64d -mshorten-memrefs -mrelax -mno-strict-align
+CPUOPTS=-march=rv64gc_zba_zbb_zbs_zbkb_zbkx_zca_zcb_zcd_zfa_zfh_zifencei_zicsr_zicond_xtheadba_xtheadbb_xtheadbs_xtheadmac_xtheadmemidx_xtheadfmemidx -mabi=lp64d -mshorten-memrefs -mrelax -mno-strict-align
 #CPUOPTS=-march=rv64gc_zba_zbb_zbs_zbkb_zbkx_zca_zcb_zcd_zfa_zfh_zicond_zifencei_zicsr -mabi=lp64d -mshorten-memrefs -mrelax -mno-strict-align
 
 CFLAGS=$(CPUOPTS) -O$(OPTLEVEL) -ffunction-sections -fdata-sections -finline -fno-pic -fno-unroll-loops -Wno-stringop-overread -nostdlib $(CFLAGSEXTRA)

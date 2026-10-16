@@ -39,7 +39,9 @@ unit cpu_execute_lsa(
     output  uint2               MEM_SIZE_STORE,
     output  uint64              MEM_WDATA,
     input   uint1               MEM_BUSY_STORE,
-    input   uint1               MEM_ACK_STORE
+    input   uint1               MEM_ACK_STORE,
+
+    output  uint1               STORE_BYPASS
 ) <reginputs> {
     uint4              STATE = 1;
 
@@ -75,7 +77,8 @@ unit cpu_execute_lsa(
     STORE.CPU_SIZE_STORE := $EX_LSA_IS_CUSTOM$ ? EXECUTE_LSA_INSTRUCTION[29,2] : Rtype( EXECUTE_LSA_INSTRUCTION ).f3[0,2];
 
     LOAD.START := 0;
-    STORE.START := 0;
+    STORE.START := 0; STORE_BYPASS := STATE[3,1] & ~$EX_LSA_IS_WR$;
+
     STORE.CPU_WDATA := $EX_LSA_IS_ATOMIC$ ? Rtype( EXECUTE_LSA_INSTRUCTION ).f7[3,1] ? ALUA.RESULT :                            // AMO OPERATION
                                                                                        EXECUTE_LSA_I2 :                         // SC.x
                                                                                IS_FS ? EXECUTE_LSA_F2 :                         // FSTORE
@@ -83,15 +86,15 @@ unit cpu_execute_lsa(
 
     COMMIT_LSA_REGISTER := { $EX_LSA_IS_WR$ ? Rtype( EXECUTE_LSA_INSTRUCTION ).rd : 5b00000 };                                  // REGISTER TO COMMIT TO
 
-    EXECUTE_LSA_RESULT_READY := ~$EX_LSA_IS_WR_F$ & STATE[3,1];
-    EXECUTE_LSA_RESULT_F_READY := $EX_LSA_IS_WR_F$ & STATE[3,1];
+    EXECUTE_LSA_RESULT_READY := $EX_LSA_IS_WR$ & ~$EX_LSA_IS_WR_F$ & STATE[3,1];
+    EXECUTE_LSA_RESULT_F_READY := $EX_LSA_IS_WR$ & $EX_LSA_IS_WR_F$ & STATE[3,1];
 
     always {
         onehot( STATE ) {
             case 0: {
+                EXECUTE_LSA_RD = EXECUTE_LSA_ACK << { $EX_LSA_IS_WR_F$, $EX_LSA_IS_WR$ ? Rtype( EXECUTE_LSA_INSTRUCTION ).rd : 5b00000 };
                 if( EXECUTE_LSA_ACK ) {                                                                                         // WAIT FOR AGU TO ACKNOWLEDGE INSTRUCTION IS READY
                     EXECUTE_LSA_READY = 0;                                                                                      //  HALT AGU SENDING MORE INSTRUCTIONS
-                    EXECUTE_LSA_RD[ { $EX_LSA_IS_WR_F$, $EX_LSA_IS_WR$ ? Rtype( EXECUTE_LSA_INSTRUCTION ).rd : 5b00000 }, 1 ] = 1;      //  FLAG RD FOR CONTENTION
 
                     if( $EX_LSA_IS_LOAD$ ) {
                         LOAD.START = 1; STATE = 2;
@@ -103,7 +106,7 @@ unit cpu_execute_lsa(
             case 1: { if( ~LOAD.BUSY ) { STATE = $EX_LSA_IS_STORE$ ? 4 : 8; } }                                                 // ATOMIC ALU
             case 2: { if( ~STORE.BUSY ) { STORE.START = 1; STATE = 8; } }                                                       // STORE FROM ATOMIC OR IF STORE WAS BUSY
             case 3: {
-                if( COMMIT_EXECUTE_LSA_RESULT_ACK | COMMIT_F_EXECUTE_LSA_RESULT_F_ACK ) {
+                if( COMMIT_EXECUTE_LSA_RESULT_ACK | COMMIT_F_EXECUTE_LSA_RESULT_F_ACK | ~$EX_LSA_IS_WR$ ) {
                     EXECUTE_LSA_RD = 0; EXECUTE_LSA_READY = 1; STATE = 1;
                 }
             }

@@ -21,33 +21,26 @@ unit cpu_commit_f(
 
     output  uint32              COMMIT_F_RD                                                                                       // INSTRUCTION COMMIT IS WRITING TO { FLOAT, RD }
 ) <reginputs> {
+    uint5   ADDR <: EXECUTE_CSRFPU_RESULT_F_READY ? COMMIT_F_CSRFPU_REGISTER : COMMIT_F_LSA_REGISTER;
+    uint1   WENABLE <: ( EXECUTE_CSRFPU_RESULT_F_READY | EXECUTE_LSA_RESULT_F_READY );
+    uint64  WDATA <: EXECUTE_CSRFPU_RESULT_F_READY ? COMMIT_F_CSRFPU_RESULT_F : COMMIT_F_LSA_RESULT_F;
+
     $$for i=1,3 do
-    F$i$.wenable1 := 0;
+    F$i$.addr1 := ADDR;
+    F$i$.wenable1 := WENABLE;
+    F$i$.wdata1 := WDATA;
     $$end
 
     COMMIT_F_EXECUTE_CSRFPU_RESULT_F_ACK := 0;
     COMMIT_F_EXECUTE_LSA_RESULT_F_ACK := 0;
 
     always {                                                                                                                    // ACCEPT RESULT AND COMMIT FROM EXECUTE STAGES
-        COMMIT_F_RD = ( EXECUTE_CSRFPU_RESULT_F_READY | EXECUTE_LSA_RESULT_F_READY  ) <<
-                      ( EXECUTE_CSRFPU_RESULT_F_READY ? COMMIT_F_CSRFPU_REGISTER : COMMIT_F_LSA_REGISTER );
+        COMMIT_F_RD = WENABLE << ADDR;
 
-        if( EXECUTE_CSRFPU_RESULT_F_READY  ) {                                                                            //  CSR AND FLOATING POINT THIRD HIGHEST PRIORITY
+        if( EXECUTE_CSRFPU_RESULT_F_READY  ) {
             COMMIT_F_EXECUTE_CSRFPU_RESULT_F_ACK = 1;
-            $$for i=1,3 do
-            F$i$.addr1 = COMMIT_F_CSRFPU_REGISTER[0,5];
-            F$i$.wdata1 = COMMIT_F_CSRFPU_RESULT_F;
-            F$i$.wenable1 = 1;
-            $$end
         } else {
-            if( EXECUTE_LSA_RESULT_F_READY ) {                                                                              //  INTEGER DIVISION SECOND HIGHEST PRIORITY
-                COMMIT_F_EXECUTE_LSA_RESULT_F_ACK = 1;
-                $$for i=1,3 do
-                F$i$.addr1 = COMMIT_F_LSA_REGISTER[0,5];
-                F$i$.wdata1 = COMMIT_F_LSA_RESULT_F;
-                F$i$.wenable1 = 1;
-                $$end
-            }
+            COMMIT_F_EXECUTE_LSA_RESULT_F_ACK = EXECUTE_LSA_RESULT_F_READY;
         }
     }
 }

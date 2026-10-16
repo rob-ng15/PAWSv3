@@ -4,6 +4,6 @@ PROJECT=ANT
 PROJECTTYPE=DEMO
 PRJSRC=$(wildcard *.c) $(wildcard *.cpp) $(wildcard *.s) $(wildcard *.h)
 PRJOBJ=ant.o
-CFLAGSEXTRA=-fweb -fsched-spec-load -frename-registers
+CFLAGSEXTRA=
 
 include ../makefile-paws.inc

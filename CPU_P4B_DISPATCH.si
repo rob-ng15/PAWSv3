@@ -132,9 +132,9 @@ unit cpu_dispatch(
     always {
         onehot( STATE ) {
             case 0: {
+                    DISPATCH_RD = DISPATCH_ACK << { $DISP_IS_WR_F$, $DISP_IS_WR$ ? Rtype( DISPATCH_INSTRUCTION ).rd : 5b00000 };
                 if( DISPATCH_ACK ) {                                                                                            // WAIT FOR AGU TO ACKNOWLEDGE INSTRUCTION IS READY
                     DISPATCH_READY = 0;                                                                                         //  HALT AGU SENDING MORE INSTRUCTIONS
-                    DISPATCH_RD[ { $DISP_IS_WR_F$, $DISP_IS_WR$ ? Rtype( DISPATCH_INSTRUCTION ).rd : 5b00000 }, 1] = 1;                //  FLAG RD FOR CONTENTION
 
                     if( $DISP_IS_CSR$ | $DISP_IS_FPU$ ) {
                         if( EXECUTE_CSRFPU_READY ) {
@@ -146,8 +146,6 @@ unit cpu_dispatch(
                             if( EXECUTE_LSA_READY ) { EXECUTE_LSA_ACK = 1; DISPATCH_READY = 1; } else { STATE = 8; }
                         }
                     }
-                } else {
-                    DISPATCH_RD = 0;
                 }
             }
             case 1: { if( EXECUTE_ALUDIVIDE_READY ) { EXECUTE_ALUDIVIDE_ACK = 1; DISPATCH_READY = 1; STATE = 1; } }

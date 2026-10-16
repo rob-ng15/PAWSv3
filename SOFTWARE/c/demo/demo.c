@@ -865,10 +865,10 @@ void backgrounddemo( void ) {
     for( unsigned char bkg = 0; bkg < 16; bkg++ ) {
         set_background( PURPLE, ORANGE, bkg );
         tpu_print_centre( 59, TRANSPARENT, WHITE, 0, backgroundnames[bkg] );
-        sleep1khz( 1000 );
+        sleep1khz( 500 );
     }
 
-    displayreset();
+    displayreset(); __copper_assemble_debug = TRUE;
 
     tpu_print_centre( 59, TRANSPARENT, WHITE, 1, "COPPER Rainbow Stars Test" );
 
@@ -882,7 +882,8 @@ void backgrounddemo( void ) {
         PURPLE,
         MAGENTA
     };
-    copper_set_memory( memoryinit );                        tpu_set( 0, 0, TRANSPARENT, WHITE, TPU_BOLD ); tpu_print( 1, "MEM = { WHITE, RED, ORANGE, YELLOW, GREEN, LTBLUE, PURPLE, MAGENTA }" );
+    copper_init_memory( memoryinit, 8 );
+    tpu_set( 0, 15, TRANSPARENT, WHITE, TPU_BOLD ); tpu_print( 1, "MEM = { WHITE, RED, ORANGE, YELLOW, GREEN, LTBLUE, PURPLE, MAGENTA }" );
 
     copper_program( 0, CU_SET, CU_BM, CU_RL, BKG_SNOW );    tpu_set( 0, 2 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "00 SET BM <- BKG_SNOW     // SET MODE TO SNOW" );
     copper_program( 1, CU_SET, CU_BA, CU_RL, BLACK );       tpu_set( 0, 3 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "01 SET BA <- BLACK        // SET ALT TO BLACK" );
@@ -891,7 +892,7 @@ void backgrounddemo( void ) {
     copper_program( 3, CU_SET, CU_R0, CU_RL, 0 );           tpu_set( 0, 6 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "03 SET R0 <- 0            // SET R0 TO 0" );
 
     copper_program( 4, CU_SET, CU_R1, CU_RR, CU_R0 );       tpu_set( 0, 8 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "04 SET R1 <- (R0)         // SET R1 TO R0" );
-    copper_program( 5, CU_SHL, CU_R1, CU_RL, 6 );           tpu_set( 0, 9 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "05 SHL R1 << 6            // SHIFT LEFT R1 BY 6" );
+    copper_program( 5, CU_MUL, CU_R1, CU_RL, 64 );          tpu_set( 0, 9 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "05 MUL R1 <- (R1) * 64    // MUL R1 BY 64" );
     copper_program( 6, CU_LFM, CU_R2, CU_RR, CU_R0 );       tpu_set( 0, 10, TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "06 LFM R2 <- [ (R0) ]     // LOAD R2 FROM MEM[R0]" );
 
     copper_program( 7, CU_SEQ, CU_RY, CU_RR, CU_R1 );       tpu_set( 0, 12, TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "07 SEQ Y == (R1)          // SKIP IF Y == R1?" );
@@ -912,7 +913,7 @@ void backgrounddemo( void ) {
     copper_program( 1, CU_SET, CU_BA, CU_RL, BLACK );       tpu_set( 0, 3 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "01 SET BA <- BLACK        // SET ALT TO BLACK" );
     copper_program( 2, CU_SET, CU_BC, CU_RL, WHITE );       tpu_set( 0, 4 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "02 SET BC <- WHITE        // SET COLOUR TO WHITE" );
 
-    copper_program( 3, CU_RND, CU_BC, CU_RL, 255 );         tpu_set( 0, 5 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "03 SET BC <- RANDOM & 255 // SET COLOUR TO RANDOM & 255" );
+    copper_program( 3, CU_SET, CU_BC, CU_RR, CU_RNG );      tpu_set( 0, 5 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "03 SET BC <- RANDOM       // SET COLOUR TO RANDOM" );
     copper_program( 4, CU_JPL, 3 );                         tpu_set( 0, 6 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "04 JPL 3                  // JUMP TO 3" );
 
     copper_startstop( 1 ); sleep1khz( 2000 );
@@ -921,13 +922,11 @@ void backgrounddemo( void ) {
 
     tpu_print_centre( 59, TRANSPARENT, WHITE, 1, "COPPER Vertical Coloured Bars" );
 
-    copper_program( 0, CU_SET, CU_BM, CU_RL, BKG_SOLID );   tpu_set( 0, 2 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "00 SET BM <- BKG_SOLID    // SET MODE TO SOLID" );
-    copper_program( 1, CU_SET, CU_BA, CU_RL, BLACK );       tpu_set( 0, 3 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "01 SET BA <- BLACK        // SET ALT TO BLACK" );
-    copper_program( 2, CU_SET, CU_BC, CU_RL, BLACK );       tpu_set( 0, 4 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "02 SET BC <- BLACK        // SET COLOUR TO BLACK" );
-
-    copper_program( 3, CU_SET, CU_R0, CU_RR, CU_RX );       tpu_set( 0, 5 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "03 SET R0 <- (RX)         // SET R0 TO RX" );
-    copper_program( 4, CU_SET, CU_BC, CU_RR, CU_R0 );       tpu_set( 0, 6 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "04 SET BC <- (R0)         // SET COLOUR TO R0" );
-    copper_program( 5, CU_JPL, 3 );                         tpu_set( 0, 7 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "05 JPL 3                  // JUMP TO 3" );
+    copper_assemble_output( 0,  "SET BM, BKG_SOLID" );
+    copper_assemble_output( 1,  "SET BA, BLACK" );
+    copper_assemble_output( 2,  "SET BC, BLACK" );
+    copper_assemble_comment( 3, "SET BC, RX",           "SET COLOUR TO X POSITION" );
+    copper_assemble_output( 4,  "JMP 3" );
 
     copper_startstop( 1 ); sleep1khz( 2000 );
 
@@ -935,15 +934,103 @@ void backgrounddemo( void ) {
 
     tpu_print_centre( 59, TRANSPARENT, WHITE, 1, "COPPER Horizontal Coloured Bars" );
 
-    copper_program( 0, CU_SET, CU_BM, CU_RL, BKG_SOLID );   tpu_set( 0, 2 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "00 SET BM <- BKG_SOLID    // SET MODE TO SOLID" );
-    copper_program( 1, CU_SET, CU_BA, CU_RL, BLACK );       tpu_set( 0, 3 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "01 SET BA <- BLACK        // SET ALT TO BLACK" );
-    copper_program( 2, CU_SET, CU_BC, CU_RL, BLACK );       tpu_set( 0, 4 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "02 SET BC <- BLACK        // SET COLOUR TO BLACK" );
-
-    copper_program( 3, CU_SET, CU_R0, CU_RR, CU_RY );       tpu_set( 0, 5 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "03 SET R0 <- (RY)         // SET R0 TO RY" );
-    copper_program( 4, CU_SET, CU_BC, CU_RR, CU_R0 );       tpu_set( 0, 6 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "04 SET BC <- (R0)         // SET COLOUR TO R0" );
-    copper_program( 5, CU_JPL, 3 );                         tpu_set( 0, 7 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "05 JPL 3                  // JUMP TO 3" );
+    copper_assemble_output( 0,  "SET BM, BKG_SOLID" );
+    copper_assemble_output( 1,  "SET BA, BLACK" );
+    copper_assemble_output( 2,  "SET BC, BLACK" );
+    copper_assemble_comment( 3,  "SET BC, RY",          "SET COLOUR TO Y POSITION" );
+    copper_assemble_output( 4,  "JMP 3" );
 
     copper_startstop( 1 ); sleep1khz( 2000 );
+
+    displayreset();
+    tpu_print_centre( 59, TRANSPARENT, WHITE, 1, "COPPER Parallax Gradient Test" );
+
+    // 32-color palette combining Sky (0-15) and Ground (16-31)
+    unsigned short parallax_memory[32] = {
+        // Sky Palette (Dark Blue to White, seamlessly looping)
+        BLUE2, BLUE2, BLUE3, BLUE3,
+        BLUE4, LTBLUE, CYAN, WHITE,
+        WHITE, CYAN, LTBLUE, BLUE4,
+        BLUE3, BLUE3, BLUE2, BLUE2,
+
+        // Ground Palette (Raster bars of Greens and Browns)
+        DKGREEN, DKGREEN, DKGREEN, GREEN4,
+        GREEN4, GREEN4, DKBROWN, DKBROWN,
+        DKBROWN, BROWN, BROWN, BROWN,
+        GREEN7, GREEN7, GREEN7, BLACK
+    };
+
+    // Load palette into the newly expanded NUCU BRAM
+    copper_init_memory( parallax_memory, 32 );
+
+    // Copper Program
+    copper_assemble_output( 0,  "SET BM, BKG_SOLID" );
+
+    // --- CONTINUOUS LOOP START ---
+    copper_assemble_output( 1,  "SET R0, RY" );
+    copper_assemble_output( 2,  "SET R1, RC" );
+
+    // Split the screen at Y = 120
+    copper_assemble_output( 3,  "SLT R0, 120" );
+    copper_assemble_output( 4,  "JMP 11" );
+
+    // --- SKY CALCULATION (Slow Parallax) ---
+    copper_assemble_output( 5,  "SHR R1, 2" );
+    copper_assemble_output( 6,  "ADD R0, R1" );
+    copper_assemble_output( 7,  "SHR R0, 3" );
+    copper_assemble_output( 8,  "AND R0, 15" );
+    copper_assemble_output( 9,  "LFM R2, R0" );
+    copper_assemble_output( 10, "JMP 17" );
+
+    // --- GROUND CALCULATION (Fast Parallax utilizing MUL) ---
+    copper_assemble_output( 11, "MUL R1, 3" );
+    copper_assemble_output( 12, "ADD R0, R1" );
+    copper_assemble_output( 13, "SHR R0, 2" );
+    copper_assemble_output( 14, "AND R0, 15" );
+    copper_assemble_output( 15, "ADD R0, 16" );
+    copper_assemble_output( 16, "LFM R2, R0" );
+
+    // --- DRAW AND REPEAT ---
+    copper_assemble_output( 17, "SET BC, R2" );
+    copper_assemble_output( 18, "JMP 1" );
+
+    // Start Copper
+    copper_startstop( 1 );
+
+    int lastframe = get_framecount();
+    // Feed the frame counter to the Copper to drive the scrolling animation
+    for( int frame = 0; frame < 120; frame++ ) {
+        set_copper_cpuinput( frame );                       // Pass tick variable to CU_RC
+        while( get_framecount() == lastframe ); lastframe = get_framecount();                                     // Sync to video frame rate
+    }
+
+    displayreset();
+    tpu_print_centre( 59, TRANSPARENT, WHITE, 1, "COPPER Procedural Gradient via ABS" );
+
+    copper_assemble_output( 0,  "SET BM, BKG_SOLID" );
+    copper_assemble_output( 1,  "WAITVB" );                     // Frame Sync
+    copper_assemble_output( 2,  "WAITACTIVE" );
+    copper_assemble_output( 3,  "SET R0, RY" );                 // Calculate distance from center scanline (Y = 120)
+    copper_assemble_output( 4,  "SUB R0, 120" );
+    copper_assemble_output( 5,  "ABS R0, R0" );                 // Apply Absolute Value (new opcode 0xa)
+    copper_assemble_output( 6,  "SHR R0, 1" );                  // Shift to smooth the gradient scaling, then apply to Background Colour
+    copper_assemble_output( 7,  "SET BC, R0" );
+    copper_assemble_output( 8,  "SET R1, RY" );                 // Wait for the next scanline safely
+    copper_assemble_output( 9,  "SGT RY, R1" );
+    copper_assemble_output( 10, "JMP 9" );
+    copper_assemble_output( 11, "SET R2, RB" );                 // Check VBLANK flag to determine if we reset to top or process the next line
+    copper_assemble_output( 12, "SGT R2, 0" );
+    copper_assemble_output( 13, "JMP 3" );                      // Not in VBLANK, continue drawing
+    copper_assemble_output( 14, "JMP 1" );                      // VBLANK active, wait for new frame
+
+    copper_startstop( 1 );
+    sleep1khz( 2000 );
+    displayreset();
+    copper_startstop( 0 );
+
+    // Cleanup
+    displayreset();
+    copper_startstop( 0 );
 }
 
 // CHARACTER MAP DISPLAY
@@ -1082,6 +1169,16 @@ void gpudemo( void ) {
     for( i = 0; i < 1024; i++ ) {
         gpu_dither( rng(16), rng( 256 ) );
         gpu_circle( rng( 256 ), rng( 352 ) - 16, rng( 256 ) - 8, rng( 32 ), 255, rng( 1 ) );
+    }
+    gpu_dither( DITHEROFF );
+    sleep1khz( 1000 );
+
+    // ELLIPSES
+    gpu_cs();
+    tpu_print_centre( 59, TRANSPARENT, WHITE, 1, "GPU Ellipse Drawing Test - Solid & Dither" );
+    for( i = 0; i < 1024; i++ ) {
+        gpu_dither( rng(16), rng( 256 ) );
+        gpu_ellipse( rng( 256 ), rng( 352 ) - 16, rng( 256 ) - 8, rng( 32 ), rng( 32 ), rng( 1 ) );
     }
     gpu_dither( DITHEROFF );
     sleep1khz( 1000 );

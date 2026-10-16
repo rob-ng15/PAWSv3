@@ -6,7 +6,7 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 export PATH=$PATH:$DIR/../../tools/fpga-binutils/mingw32/bin/
 
 ARCH="riscv64"
-GCCVER=15.2.0
+GCCVER=16.2.0
 CPUOPTS="-march=rv64gc_zba_zbb_zbs_zbkb_zbkx_zca_zcb_zcd_zfa_zfh_zicond_zifencei_zicsr_xtheadba_xtheadbb_xtheadbs_xtheadcondmov_xtheadmac_xtheadmemidx_xtheadfmemidx_xtheadmempair -mabi=lp64d -mshorten-memrefs -mrelax -mno-strict-align"
 
 echo "using $ARCH"

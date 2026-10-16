@@ -178,7 +178,7 @@ void paws_memset_rectangle32( void *restrict destination, int value, size_t coun
 // OUTPUT TO UART
 // OUTPUT INDIVIDUAL CHARACTER/STRING TO THE UART
 void uart_outputcharacter(char c) {
-    while( *UART_STATUS & 2 ) {} *UART_DATA = c;
+    while( *UART_STATUS & 2 ); *UART_DATA = c;
     if( c == '\n' ) uart_outputcharacter('\r');
 }
 void uart_outputstring( const char *s ) {
@@ -476,14 +476,13 @@ void copper_startstop( unsigned char status ) {
 
 void copper_program( unsigned short address, unsigned char command, unsigned char reg1, unsigned char flag, unsigned short reg2 ) {
     *BACKGROUND_COPPER_ADDRESS = address;
-    *BACKGROUND_COPPER_OP = ( ( command & 0xf ) << 14 ) | ( ( reg1 & 0x7 ) << 11 ) | ( ( flag & 0x1 ) << 10 ) | ( reg2 & 0x7f );
+    *BACKGROUND_COPPER_OP = ( ( command & 0xf ) << 14 ) | ( ( reg1 & 0x7 ) << 11 ) | ( ( flag & 0x1 ) << 10 ) | ( reg2 & 0x3ff );
     *BACKGROUND_COPPER_PROGRAM = 1;
 }
 
-void copper_set_memory( unsigned short *memory ) {
-    *BACKGROUND_COPPER_MEMRESET = 0;
-    for( int i = 0; i < 8; i++ )
-        *BACKGROUND_COPPER_MEMVINIT = memory[i];
+void copper_init_memory( unsigned short *memory, unsigned int number ) {
+    for( int i = 0; i < number; i++ )
+        copper_memwrite( memory[i], i );
 }
 
 void set_copper_cpuinput( unsigned short value ) {
@@ -495,11 +494,210 @@ unsigned short get_copper_cpuoutput( void ) {
 }
 
 void copper_memwrite( unsigned short value, unsigned short cell ) {
-    BACKGROUND_MEMORY[ cell & 7 ] = value;
+    *BACKGROUND_COPPER_MEMADDR = cell;
+    *BACKGROUND_COPPER_MEMVALUE = value;
 }
 
 unsigned short copper_memread( unsigned short cell ) {
-    return( BACKGROUND_MEMORY[ cell & 7 ] );
+    *BACKGROUND_COPPER_MEMADDR = cell;
+    return( *BACKGROUND_COPPER_MEMVALUE );
+}
+
+// --- SYMBOL TABLES ---
+int __copper_assemble_debug = 0;
+
+typedef struct {
+    const char *name;
+    unsigned short value;
+} NUCU_Symbol;
+
+// NUCU Hardware Registers
+const NUCU_Symbol nucu_registers[] = {
+    {"BM", CU_BM}, {"BC", CU_BC}, {"BA", CU_BA},
+    {"RB", CU_RB}, {"RX", CU_RX}, {"RY", CU_RY}, {"RC", CU_RC},
+    {"R0", CU_R0}, {"R1", CU_R1}, {"R2", CU_R2}, {"R3", CU_R3},
+    {"RNG", CU_RNG}
+};
+const int NUM_REGISTERS = sizeof(nucu_registers) / sizeof(nucu_registers[0]);
+
+// Predefined Colours and Background Patterns
+const NUCU_Symbol nucu_constants[] = {
+    // 16 Background Patterns
+    {"BKG_SOLID", BKG_SOLID},       {"BKG_CHKBRD_1", BKG_CHKBRD_1}, {"BKG_CHKBRD_2", BKG_CHKBRD_2},
+    {"BKG_CHKBRD_3", BKG_CHKBRD_3}, {"BKG_CHKBRD_4", BKG_CHKBRD_4}, {"BKG_CHKBRD_5", BKG_CHKBRD_5},
+    {"BKG_5050_V", BKG_5050_V},     {"BKG_5050_H", BKG_5050_H},     {"BKG_RAINBOW", BKG_RAINBOW},
+    {"BKG_SNOW", BKG_SNOW},         {"BKG_STATIC", BKG_STATIC},     {"BKG_HATCH", BKG_HATCH},
+    {"BKG_LSLOPE", BKG_LSLOPE},     {"BKG_RSLOPE", BKG_RSLOPE},     {"BKG_VSTRIPE", BKG_VSTRIPE},
+    {"BKG_HSTRIPE", BKG_HSTRIPE},
+
+    // 39 Predefined PAWS Colours
+    {"DKRED", TRANSPARENT},         {"BLACK", BLACK},               {"WHITE", WHITE},
+    {"BLUE", BLUE},                 {"GREEN", GREEN},               {"CYAN", CYAN},
+    {"RED", RED},                   {"MAGENTA", MAGENTA},           {"YELLOW", YELLOW},
+    {"BLUE1", BLUE1},               {"BLUE2", BLUE2},               {"BLUE3", BLUE3},
+    {"BLUE4", BLUE4},               {"GREEN1", GREEN1},             {"GREEN2", GREEN2},
+    {"GREEN3", GREEN3},             {"GREEN4", GREEN4},             {"GREEN5", GREEN5},
+    {"GREEN6", GREEN6},             {"GREEN7", GREEN7},             {"RED2", RED2},
+    {"RED3", RED3},                 {"GREY1", GREY1},               {"GREY2", GREY2},
+    {"GREY3", GREY3},               {"GREY4", GREY4},               {"GREY5", GREY5},
+    {"GREY6", GREY6},               {"INDIGO", INDIGO},             {"PURPLE", PURPLE},
+    {"VIOLET", VIOLET},             {"PINK", PINK},                 {"ORANGE", ORANGE},
+    {"DKBLUE", DKBLUE},             {"DKGREEN", DKGREEN},           {"DKRED", DKRED},
+    {"DKPURPLE", DKPURPLE},         {"DKMAGENTA", DKMAGENTA},       {"DKYELLOW", DKYELLOW},
+    {"LTBLUE", LTBLUE},             {"DKBROWN", DKBROWN},           {"FORESTGREEN", FORESTGREEN},
+    {"STEELBLUE", STEELBLUE},       {"BROWN", BROWN},               {"PEACH", PEACH}
+};
+const int NUM_CONSTANTS = sizeof(nucu_constants) / sizeof(nucu_constants[0]);
+
+// --- PARSERS ---
+
+// Map register string to index via table
+int parse_register( char *reg_str ) {
+    if (!reg_str) return -1;
+    for (int i = 0; i < NUM_REGISTERS; i++) {
+        if (strcmp(reg_str, nucu_registers[i].name) == 0) {
+            return nucu_registers[i].value;
+        }
+    }
+    return -1;
+}
+
+// Map literals and basic constants via table, fallback to numeric conversion
+unsigned short parse_literal( char *lit_str ) {
+    if (!lit_str) return 0;
+
+    // Check symbol table
+    for (int i = 0; i < NUM_CONSTANTS; i++) {
+        if (strcmp(lit_str, nucu_constants[i].name) == 0) {
+            return nucu_constants[i].value;
+        }
+    }
+
+    // Fallback: Convert decimal (e.g. 255) or hex (e.g. 0xff) to numeric.
+    // Handles any of the remaining 256 indexed colours not specifically named.
+    return strtol(lit_str, NULL, 0);
+}
+
+// --- MAIN ASSEMBLER ---
+
+void copper_assemble( unsigned short address, char *assembly ) {
+    char op[16] = {0}, arg1[16] = {0}, arg2[16] = {0};
+    unsigned char command = 0, reg1 = 0, flag = 0;
+    unsigned short reg2 = 0;
+
+    // Copy string to local buffer (strtok modifies it, read-only strings will fault)
+    char buffer[64];
+    strncpy(buffer, assembly, 63);
+    buffer[63] = 0;
+
+    // Convert entirely to uppercase for robust matching
+    for(int i = 0; buffer[i]; i++) {
+        if(buffer[i] >= 'a' && buffer[i] <= 'z') buffer[i] -= 32;
+    }
+
+    // Tokenize by spaces, commas, or tabs
+    char *token = strtok(buffer, " ,\t");
+    if(token) strcpy(op, token);
+    token = strtok(NULL, " ,\t");
+    if(token) strcpy(arg1, token);
+    token = strtok(NULL, " ,\t");
+    if(token) strcpy(arg2, token);
+
+    // --- Parse ALU Opcodes ---
+    int is_alu = 1;
+    if      (strcmp(op, "SET") == 0) command = CU_SET;
+    else if (strcmp(op, "ADD") == 0) command = CU_ADD;
+    else if (strcmp(op, "SUB") == 0) command = CU_SUB;
+    else if (strcmp(op, "AND") == 0) command = CU_AND;
+    else if (strcmp(op, "OR")  == 0) command = CU_OR;
+    else if (strcmp(op, "XOR") == 0) command = CU_XOR;
+    else if (strcmp(op, "MUL") == 0) command = CU_MUL;
+    else if (strcmp(op, "SHR") == 0) command = CU_SHR;
+    else if (strcmp(op, "SHL") == 0) command = CU_SHR;
+    else if (strcmp(op, "SEQ") == 0) command = CU_SEQ;
+    else if (strcmp(op, "SNE") == 0) command = CU_SNE;
+    else if (strcmp(op, "ABS") == 0) command = CU_ABS;
+    else if (strcmp(op, "SLT") == 0) command = CU_SLT;
+    else if (strcmp(op, "SGE") == 0) command = CU_SLT;
+    else if (strcmp(op, "SLE") == 0) command = CU_SLE;
+    else if (strcmp(op, "SGT") == 0) command = CU_SLE;
+    else if (strcmp(op, "MIN") == 0) command = CU_MIN;
+    else if (strcmp(op, "MAX") == 0) command = CU_MAX;
+    else if (strcmp(op, "LFM") == 0) command = CU_LFM;
+    else if (strcmp(op, "STM") == 0) command = CU_STM;
+    else is_alu = 0;
+
+    if (is_alu) {
+        reg1 = parse_register(arg1);
+        int r2 = parse_register(arg2);
+
+        if (r2 != -1) {
+            flag = CU_RR;
+            reg2 = r2;
+        } else {
+            flag = CU_RL;
+            reg2 = parse_literal(arg2);
+        }
+
+        // Handle modifier bounds mapping directly inside the assembler
+        if (strcmp(op, "SHL") == 0 || strcmp(op, "MAX") == 0 || strcmp(op, "SGE") == 0 || strcmp(op, "SGT") == 0 || strcmp(op, "SNE") == 0) reg2 = CU_MOD_MAX(reg2);
+    } else {
+        // --- Parse Control Opcodes ---
+        command = 0;
+        if (strcmp(op, "JMP") == 0) {
+            reg1 = 0;
+            int r2 = parse_register(arg1);
+            if (r2 != -1) { flag = CU_RR; reg2 = r2; }
+            else          { flag = CU_RL; reg2 = parse_literal(arg1); }
+        }
+        else if (strcmp(op, "JSR") == 0) {
+            reg1 = 1;
+            int r2 = parse_register(arg1);
+            if (r2 != -1) { flag = CU_RR; reg2 = r2; }
+            else          { flag = CU_RL; reg2 = parse_literal(arg1); }
+        }
+        else if (strcmp(op, "RET") == 0) {
+            reg1 = 2; flag = 0; reg2 = 0;
+        }
+        else if (strcmp(op, "PUSH") == 0) {
+            reg1 = 3;
+            int r2 = parse_register(arg1);
+            if (r2 != -1) { flag = CU_RR; reg2 = r2; }
+            else          { flag = CU_RL; reg2 = parse_literal(arg1); }
+        }
+        else if (strcmp(op, "POP") == 0) {
+            reg1 = parse_register(arg1);
+            flag = 0; reg2 = 0;
+        }
+        else if (strcmp(op, "WAITACTIVE") == 0) {
+            reg1 = 4; flag = 1; reg2 = 0;
+        }
+        else if (strcmp(op, "WAITY") == 0) {
+            reg1 = 5; flag = 1; reg2 = parse_literal(arg1);
+        }
+        else if (strcmp(op, "WAITX") == 0) {
+            reg1 = 6; flag = 1; reg2 = parse_literal(arg1);
+        }
+        else if (strcmp(op, "WAITVB") == 0) {
+            reg1 = 7; flag = 1; reg2 = 0;
+        }
+    }
+
+    // Dispatch to the native hardware mapping function
+    if( __copper_assemble_debug ) {
+        uart_printf("%4d %20s  %4d 0x%1x 0x%03x 0x%1x 0x%03x\n",address,assembly,address, command, reg1, flag, reg2);
+        sleep1khz( 100 );
+    }
+    copper_program(address, command, reg1, flag, reg2);
+}
+
+void copper_assemble_output( unsigned short address, char *assembly ) {
+    tpu_set( 0, address, TRANSPARENT, WHITE, TPU_NORMAL ); tpu_printf( 1, "%4d ",address ); tpu_print( 1, assembly );
+    copper_assemble( address, assembly );
+}
+void copper_assemble_comment( unsigned short address, char *assembly, char *comment ) {
+    tpu_set( 40, address, TRANSPARENT, WHITE, TPU_BOLD ); tpu_print( 1, comment );
+    copper_assemble_output( address, assembly );
 }
 
 // SCROLLABLE TILEMAP
@@ -741,85 +939,16 @@ void gpu_circle( unsigned char colour, short x1, short y1, short radius, unsigne
 }
 
 // DRAW AN (optional filled) ELLIPSE at centre (xc,yc) of radii radius_x and radius_y
-void gpu_ellipse_plot4( unsigned char colour, short xc, short yc, short xd, short yd ) {
-    gpu_pixel( colour, xc + xd, yc + yd );
-    gpu_pixel( colour, xc - xd, yc + yd );
-    gpu_pixel( colour, xc - xd, yc - yd );
-    gpu_pixel( colour, xc + xd, yc -yd );
-}
-
-void gpu_ellipse_fill4( unsigned char colour, short xc, short yc, short xd, short yd ) {
-    gpu_rectangle( colour, xc + xd, yc + yd, xc + xd, yc -yd );
-    gpu_rectangle( colour, xc - xd, yc + yd, xc - xd, yc -yd );
-}
-
-void gpu_ellipse( unsigned char colour, short xc, short yc, short radius_x, short radius_y, int filled ) {
+void gpu_ellipse( unsigned char colour, short xc, short yc, short radius_x, short radius_y, unsigned char filled ) {
     short active_x, active_y;
     int Xchange, Ychange, ellipseERROR, Asquare2, Bsquare2, Xstop, Ystop;
 
-    if( !radius_x && !radius_y ) return;
-    if( !radius_x ) {
-        if( filled ) {
-            gpu_rectangle( colour, xc, yc - radius_y, xc, yc + radius_y );
-        } else {
-            gpu_line( colour, xc, yc - radius_y, xc, yc + radius_y );
-        }
-        return;
-    }
-    if( !radius_y ) {
-        if( filled ) {
-            gpu_rectangle( colour, xc - radius_x, yc, xc + radius_x, yc );
-        } else {
-            gpu_line( colour, xc - radius_x, yc, xc + radius_x, yc );
-        }
-        return;
-    }
-
-    Asquare2 = 2* radius_x * radius_x;
-    Bsquare2 = 2 * radius_y * radius_y;
-
-    active_x = radius_x;
-    active_y = 0;
-    Xchange = radius_y * radius_y * ( 1 - 2 * radius_x );
-    Ychange = radius_x * radius_x;
-    ellipseERROR= 0;
-    Xstop = Bsquare2 * radius_x;
-    Ystop = 0;
-
-    while( Xstop >= Ystop ) {
-        if( filled ) gpu_ellipse_fill4( colour, xc, yc, active_x, active_y ); else  gpu_ellipse_plot4( colour, xc, yc, active_x, active_y );
-        active_y++;
-        Ystop += Asquare2;
-        ellipseERROR += Ychange;
-        Ychange += Asquare2;
-        if( ( 2 * ellipseERROR + Xchange ) > 0 ) {
-            active_x--;
-            Xstop -= Bsquare2;
-            ellipseERROR += Xchange;
-            Xchange += Bsquare2;
-        }
-    }
-
-    active_x = 0;
-    active_y = radius_y;
-    Xchange = radius_y * radius_y;
-    Ychange = radius_x * radius_x * ( 1 - 2 * radius_y );
-    ellipseERROR= 0;
-    Xstop = 0;
-    Ystop = Asquare2 * radius_y;
-
-    while( Xstop <= Ystop ) {
-        if( filled ) gpu_ellipse_fill4( colour, xc, yc, active_x, active_y ); else  gpu_ellipse_plot4( colour, xc, yc, active_x, active_y );
-        active_x++;
-        Xstop += Bsquare2;
-        ellipseERROR += Xchange;
-        Xchange += Bsquare2;
-        if( ( 2 * ellipseERROR + Ychange ) > 0 ) {
-            active_y--;
-            Ystop -= Asquare2;
-            ellipseERROR += Ychange;
-            Ychange += Asquare2;
-        }
+    if( !radius_x && !radius_y ) {
+    } else {
+        *GPU_COLOUR = colour;
+        *GPU_X = xc; *GPU_Y = yc; *GPU_PARAM0 = radius_x; *GPU_PARAM1 = radius_y;
+        wait_gpu();
+        *GPU_WRITE = 12 - ( filled & 1 );
     }
 }
 
@@ -1269,28 +1398,28 @@ void DoDrawList2Dscale( struct DrawList2D *list, int numentries, int xc, int yc,
 // WITH 64 SPRITES ( 0 to 63 ) each PAIR with 8 16 x 16 pixel bitmaps OR 2 32 x 32 pixel bitmaps
 
 // SET THE BITMAPS FOR sprite_number in sprite_layer to the 8 x 16 x 16 or 2 x 32 x 32 pixel bitmaps ( 2048 RRGGGBBM pixels )
-void set_sprite_bitmaps( unsigned char sprite_number, unsigned char *sprite_bitmaps ) {
-    *SPRITE_WRITER_NUMBER = sprite_number >> 1;
-    DMASTART( sprite_bitmaps, (void *restrict)SPRITE_WRITER_COLOUR, 2048, DMA_CPY_M_TO_S );
+void set_sprite_bitmaps( unsigned char tile_number, unsigned char *sprite_bitmaps, unsigned int bytes ) {
+    *SPRITE_WRITER_NUMBER = tile_number;
+    DMASTART( sprite_bitmaps, (void *restrict)SPRITE_WRITER_COLOUR, bytes, DMA_CPY_M_TO_S );
 }
 
 // SET THE 16x16/32x32 SPRITES FROM A SPRITESHEET
-void set_sprite_bitamps_from_spritesheet( unsigned char sprite_number, unsigned char count, unsigned char *sprite_bitmaps, unsigned char mode ) {
+void set_sprite_bitamps_from_spritesheet( unsigned char tile_number, unsigned char count, unsigned char *sprite_bitmaps, unsigned char mode ) {
     if( mode ) {
-        // 2 x 32 x 32 sprites
+        // 2 x 32 x 32 sprites (4 tiles per sprite)
         for( int i = 0; i < count; i++ ) {
-            *SPRITE_WRITER_NUMBER = ( sprite_number >> 1 ) + i;
-            for( int y = 0; y < 64; y++ ) {
+            *SPRITE_WRITER_NUMBER = tile_number + (i * 4);
+            for( int y = 0; y < 32; y++ ) { // Write exactly 1024 bytes (32x32)
                 for( int x = 0; x < 32; x++ ) {
                     *SPRITE_WRITER_COLOUR = sprite_bitmaps[ ( i * 32 ) + x + ( y * count * 32 ) ];
                 }
             }
         }
     } else {
-        // 8 x 16 x 16 sprites
+        // 8 x 16 x 16 sprites (1 tile per sprite)
         for( int i = 0; i < count; i++ ) {
-            *SPRITE_WRITER_NUMBER = ( sprite_number >> 1 ) + i;
-            for( int y = 0; y < 128; y++ ) {
+            *SPRITE_WRITER_NUMBER = tile_number + i;
+            for( int y = 0; y < 16; y++ ) { // Write exactly 256 bytes (16x16)
                 for( int x = 0; x < 16; x++ ) {
                     *SPRITE_WRITER_COLOUR = sprite_bitmaps[ ( i * 16 ) + x + ( y * count * 16 ) ];
                 }
@@ -1299,18 +1428,23 @@ void set_sprite_bitamps_from_spritesheet( unsigned char sprite_number, unsigned 
     }
 }
 
-// SET SPRITE sprite_number to active status, in colour to (x,y) with bitmap number tile ( 0 - 7 ) in sprite_attributes bit 0 size == 0 16 x 16 == 1 32 x 32 pixel size, bit 1 x-mirror bit 2 y-mirror 2 bit layer number
+// SET SPRITE sprite_number to active status, in colour to (x,y) with bitmap number tile ( 0 - 255 ) in sprite_attributes bit 0 size == 0 16 x 16 == 1 32 x 32 pixel size, bit 1 x-mirror bit 2 y-mirror 2 bit layer number
 void set_sprite( unsigned char sprite_number, unsigned char active, short x, short y, unsigned char tile, unsigned short sprite_actions ) {
     SPRITE_ACTIVE[sprite_number] = active;
     SPRITE_TILE[sprite_number] = tile;
     SPRITE_X[sprite_number] = x;
     SPRITE_Y[sprite_number] = y;
     SPRITE_ACTIONS[sprite_number] = sprite_actions;
+
+    // Calculate and write the exact physical size for the new rendering loops
+    unsigned short base_size = (sprite_actions & 64) ? 32 : 16;
+    unsigned short shift = (sprite_actions >> 3) & 3;
+    SPRITE_SIZE[sprite_number] = (sprite_actions & 32) ? (base_size >> shift) : (base_size << shift);
 }
 
 // SET or GET ATTRIBUTES for sprite_number in sprite_layer
 //  attribute == 0 active status ( 0 == inactive, 1 == active )
-//  attribute == 1 tile number ( 0 to 7 )
+//  attribute == 1 tile number ( 0 to 255 )
 //  attribute == 3 x coordinate
 //  attribute == 4 y coordinate
 //  attribute == 5 attributes bit 0 = size == 0 16x16 == 1 32x32. bit 1 = x-mirror bit 2 = y-mirror + 2 bit layer number
@@ -1374,9 +1508,10 @@ unsigned short get_sprite_layer_collision( unsigned char sprite_number ) {
 
 // UPDATE A SPITE moving by x and y deltas, with optional wrap/kill and optional changing of the tile
 void update_sprite( unsigned char sprite_number, unsigned char kill, short dx, short dy, unsigned char dt ) {
-    static unsigned int sizes[] = { 16, 32, 64, 128, 16, 8, 4, 2, 32, 64, 128, 256, 32, 16, 8, 4,  };
-    int size = sizes[ ( SPRITE_ACTIONS[ sprite_number ] >> 3 ) ];
-
+    unsigned short actions = SPRITE_ACTIONS[sprite_number];
+    unsigned short base_size = (actions & 64) ? 32 : 16;
+    unsigned short shift = (actions >> 3) & 3;
+    int size = (actions & 32) ? (base_size >> shift) : (base_size << shift);
 
     short x = SPRITE_X[ sprite_number ] + dx;
     short y = SPRITE_Y[ sprite_number ] + dy;
@@ -1408,9 +1543,10 @@ void update_sprite_compat(unsigned char sprite_number, unsigned short updateflag
 
 // COMBINE 4 16x16 SPRITES INTO 1 32x32 SPRITE, USING THE GIVEN COORDINATES AS THE CENTRE, AND ADJUSTING FOR SIZE, REFLECTION AND ROTATION
 // SET THE 32x32 ( 4 x 16x16 ) FROM A SPRITESHEET
-void set_sprite_bitamps_from_spritesheet32x32( unsigned char sprite_number, unsigned char *sprite_bitmaps ) {
+void set_sprite_bitamps_from_spritesheet32x32( unsigned char tile_number, unsigned char *sprite_bitmaps ) {
     for( int s = 0; s < 16; s++ ) {
-        *SPRITE_WRITER_NUMBER = ( sprite_number >> 1 ) + s;
+        // Old math mapped 2048 bytes per sprite pair, which equals exactly 8 tiles.
+        *SPRITE_WRITER_NUMBER = tile_number + (s * 8);
         for( int y = 0; y < 128; y++ ) {
             int base = ( s & 0x0c ) * 2048 + ( s & 0x01 ) * 4096 + ( s & 0x02 ) * 8 + ( y & 0xf0 ) * 2 + ( y & 0x0f ) * 256;
             for( int x = 0; x < 16; x++ ) {
@@ -1423,24 +1559,19 @@ void set_sprite_bitamps_from_spritesheet32x32( unsigned char sprite_number, unsi
 // SET 4 SPRITES AS A 32x32 BLOCK, REFLECTING/ROTATING AS REQUIRED. POSITION IS THE CENTRE OF THE 32x32 BLOCK (CAN BE DOUBLED TO 64x64)
 void set_sprite32( unsigned char sprite_number, unsigned char active, short x, short y, unsigned char tile, unsigned char sprite_actions ) {
     static unsigned char positions[][4] = {
-        { 0, 1, 2, 3 }, // NO ACTION
-        { 2, 3, 0, 1 }, // REFLECT X
-        { 1, 0, 3, 2 }, // REFLECT Y
-        { 3, 2, 1, 0 }, // REFLECT X AND Y
-        { 0, 1, 2, 3 }, // ROTATE 0
-        { 2, 0, 3, 1 }, // ROTATE 90
-        { 3, 2, 1, 0 }, // ROTATE 180
-        { 1, 3, 0, 2 }, // ROTATE 270
+        { 0, 1, 2, 3 }, { 2, 3, 0, 1 }, { 1, 0, 3, 2 }, { 3, 2, 1, 0 },
+        { 0, 1, 2, 3 }, { 2, 0, 3, 1 }, { 3, 2, 1, 0 }, { 1, 3, 0, 2 }
     };
-    static unsigned int sizes[] = { 16, 32, 64, 128, 16, 8, 4, 2, 32, 64, 128, 256, 32, 16, 8, 4 };
-    int size = sizes[ ( sprite_actions >> 3 ) ];
+
+    unsigned short base_size = (sprite_actions & 64) ? 32 : 16;
+    unsigned short shift = (sprite_actions >> 3) & 3;
+    int size = (sprite_actions & 32) ? (base_size >> shift) : (base_size << shift);
 
     set_sprite( sprite_number + 2 * positions[ sprite_actions & 7 ][0], active, x - size, y - size, tile, sprite_actions );
     set_sprite( sprite_number + 2 * positions[ sprite_actions & 7 ][1], active, x - size, y, tile, sprite_actions );
     set_sprite( sprite_number + 2 * positions[ sprite_actions & 7 ][2], active, x, y - size, tile, sprite_actions );
     set_sprite( sprite_number + 2 * positions[ sprite_actions & 7 ][3], active, x, y, tile, sprite_actions );
 }
-
 // CHARACTER MAP FUNCTIONS
 // The character map is an 80 x 60 character window with a 1024 character 8 x 8 pixel character generator ROM ) normal/bold/underline/flash/2x/2y/altset
 // NO SCROLLING, CURSOR WRAPS TO THE TOP OF THE SCREEN

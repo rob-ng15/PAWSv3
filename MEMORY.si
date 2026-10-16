@@ -17,9 +17,9 @@ unit bramcontroller(
     $$if not SIMULATION then
         dualport_bram uint16 ram <"dualport_bram_wmask_byte"> [4096] = {file("ROM/BIOS.bin"), pad(uninitialized)};              // BIOS WITH I/O
     $$else
-        dualport_bram uint16 ram <"dualport_bram_wmask_byte"> [4096] = {file("ROM/VBIOS.bin"), pad(uninitialized)};             // BIOS FOR VERILATOR ( SMP spites and mandelbrot )
-//        dualport_bram uint16 ram <"dualport_bram_wmask_byte"> [4096] = {file("ROM/RBIOS.bin"), pad(uninitialized)};           // BIOS FOR VERILATOR ( raytracing demo )
-//        dualport_bram uint16 ram <"dualport_bram_wmask_byte"> [4096] = {file("ROM/MBIOS.bin"), pad(uninitialized)};           // BIOS FOR VERILATOR ( memory test )
+    dualport_bram uint16 ram <"dualport_bram_wmask_byte"> [4096] = {file("ROM/VBIOS.bin"), pad(uninitialized)};             // BIOS FOR VERILATOR ( INTERRUPTS spites and mandelbrot )
+//    dualport_bram uint16 ram <"dualport_bram_wmask_byte"> [4096] = {file("ROM/TBIOS.bin"), pad(uninitialized)};             // BIOS FOR VERILATOR ( INTERRUPTS spites and mandelbrot )
+    //        dualport_bram uint16 ram <"dualport_bram_wmask_byte"> [4096] = {file("ROM/MBIOS.bin"), pad(uninitialized)};           // BIOS FOR VERILATOR ( memory test )
     $$end
 
     ram.wenable0 := {2{IN_RANGE}} & ( |SIZE ? 2b11 : { ADDR[0,1], ~ADDR[0,1] } );                                               // LOW WRITE FOR 8 OR 16/32 BIT

@@ -5,6 +5,6 @@ PROJECT=W-STONE
 PROJECTTYPE=TEST
 PRJSRC=$(wildcard *.c) $(wildcard *.cpp) $(wildcard *.s) $(wildcard *.h)
 PRJOBJ=whetstone.o
-CFLAGSEXTRA=-fweb -fsched-spec-load -frename-registers
+CFLAGSEXTRA=
 
 include ../makefile-paws.inc

@@ -166,17 +166,17 @@ void display_state( void ) {
         }
     }
 
-    for( int y = 0; y < 3; y++ ) {
-        for( int x = 0; x < 4; x++ ) {
-            set_tilemap_tile_abs( 0, 12 + x * 2, y + 5, 3, 0 );
-            set_tilemap_tile_abs( 0, 13 + x * 2, y + 5, 4, 0 );
-            int number = y * 4 + x;
+    for( int y = 0; y < 4; y++ ) {
+        for( int x = 0; x < 3; x++ ) {
+            set_tilemap_tile_abs( 0, 12 + x * 2, y + 4, 3, 0 );
+            set_tilemap_tile_abs( 0, 13 + x * 2, y + 4, 4, 0 );
+            int number = y * 3 + x;
             if( number < 6 ) {
-                set_tilemap_tile_abs( 2, 12 + x * 2, y + 5, number + 33, 0 );
-                set_tilemap_tile_abs( 2, 13 + x * 2, y + 5, number + 41, 0 );
+                set_tilemap_tile_abs( 2, 12 + x * 2, y + 4, number + 33, 0 );
+                set_tilemap_tile_abs( 2, 13 + x * 2, y + 4, number + 41, 0 );
             } else {
-                set_tilemap_tile_abs( 2, 12 + x * 2, y + 5, number + 43, 0 );
-                set_tilemap_tile_abs( 2, 13 + x * 2, y + 5, number + 51, 0 );
+                set_tilemap_tile_abs( 2, 12 + x * 2, y + 4, number + 43, 0 );
+                set_tilemap_tile_abs( 2, 13 + x * 2, y + 4, number + 51, 0 );
             }
         }
     }

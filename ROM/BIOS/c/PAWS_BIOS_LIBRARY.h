@@ -1,3 +1,9 @@
+static inline long _rv64_clz(long rs1) { long rd; __asm__ ("clz     %0, %1" : "=r"(rd) : "r"(rs1)); return rd; }
+static inline int _rv64_clzw(int rs1) { int rd; __asm__ ("clzw     %0, %1" : "=r"(rd) : "r"(rs1)); return rd; }
+static inline long _rv64_cpop(long rs1) { long rd; __asm__ ("cpop    %0, %1" : "=r"(rd) : "r"(rs1)); return rd; }
+static inline int _rv64_cpopw(int rs1) { int rd; __asm__ ("cpopw    %0, %1" : "=r"(rd) : "r"(rs1)); return rd; }
+static inline long _rv64_ctz(long rs1) { long rd; __asm__ ("ctz     %0, %1" : "=r"(rd) : "r"(rs1)); return rd; }
+static inline int _rv64_ctzw(int rs1) { int rd; __asm__ ("ctzw     %0, %1" : "=r"(rd) : "r"(rs1)); return rd; }
 static inline long _rv64_rol(long RS1, long RS2) { long rd; if (__builtin_constant_p(RS2)) __asm__ ("rori    %0, %1, %2" : "=r"(rd) : "r"(RS1), "i"(63 & -RS2)); else __asm__ ("rol     %0, %1, %2" : "=r"(rd) : "r"(RS1), "r"(RS2)); return rd; }
 static inline long _rv64_rev8(long RS1) { long rd; __asm__ ("rev8     %0, %1" : "=r"(rd) : "r"(RS1)); return rd; }
 
@@ -137,6 +143,25 @@ void sleep1khz( unsigned short counter, unsigned char timer ) {
     while( CSRtime() < target );
 }
 
+// RETURN PSEUDO RANDOM NUMBER 0 <= RNG < RANGE ( effectively 0 to range - 1 )
+unsigned short rng( unsigned short range ) {
+    unsigned short trial, mask;
+
+    switch( range ) {
+        case 0: trial = 0; break;
+
+        case 1:
+        case 2: trial = *RNG & 1; break;
+
+        default:
+            if( _rv64_cpopw( range ) == 1 ) return( *RNG & ( range - 1 ) );                                                     // POWER OF 2
+            mask = ( 1 << ( _rv64_clzw( range ) - 14 ) ) - 1;                                                                   // SET MASK TO -1 POWER OF 2 THAT COVERS RANGE
+            do { trial = *RNG & mask; } while ( trial >= range );                                                               // SELECT RNG UNTIL WITHIN RANGE
+    }
+
+    return( trial );
+}
+
 // DMA CONTROLLER
 void DMASTART( const void *restrict source, void *restrict destination, unsigned int count, unsigned short mode ) {
     *DMASOURCE = (unsigned long)source;
@@ -193,6 +218,15 @@ void wait_gpu( void ) {
     while( *GPU_STATUS );
 }
 
+// SET GPU CROPPING RECTANGLE
+void gpu_crop( short left, short top, short right, short bottom ) {
+    wait_gpu();
+    *CROP_LEFT = ( left < 0 ) ? 0 : ( left > 319 ) ? 319 : left;
+    *CROP_RIGHT = ( right < 0 ) ? 0 : ( right > 319 ) ? 319 : right;
+    *CROP_TOP = ( top < 0 ) ? 0 : ( top > 239 ) ? 239 : top;
+    *CROP_BOTTOM = ( bottom < 0 ) ? 0 : ( bottom > 239 ) ? 239 : bottom;
+}
+
 // SET GPU TO RECEIVE A PIXEL BLOCK, SEND INDIVIDUAL PIXELS, STOP
 void gpu_pixelblock_start( short x, short y, unsigned short w ) {
     wait_gpu();
@@ -201,6 +235,11 @@ void gpu_pixelblock_start( short x, short y, unsigned short w ) {
     *GPU_PARAM0 = w;
     *GPU_PARAM1 = TRANSPARENT;
     *GPU_WRITE = 10;
+}
+
+// SET GPU DITHER MODE AND ALTERNATIVE COLOUR
+void gpu_dither( unsigned char mode, unsigned char colour ) {
+    wait_gpu(); *GPU_COLOUR_ALT = colour; *GPU_DITHERMODE = mode;
 }
 
 // SET THE PIXEL at (x,y) to colour
@@ -257,6 +296,20 @@ void gpu_circle( unsigned char colour, short x1, short y1, short radius, unsigne
         *GPU_X = x1; *GPU_Y = y1; *GPU_PARAM0 = radius; *GPU_PARAM1 = drawsectors;
         wait_gpu();
         *GPU_WRITE = 4 + filled;
+    }
+}
+
+// DRAW AN (optional filled) ELLIPSE at centre (xc,yc) of radii radius_x and radius_y
+void gpu_ellipse( unsigned char colour, short xc, short yc, short radius_x, short radius_y, unsigned char filled ) {
+    short active_x, active_y;
+    int Xchange, Ychange, ellipseERROR, Asquare2, Bsquare2, Xstop, Ystop;
+
+    if( !radius_x && !radius_y ) {
+    } else {
+        *GPU_COLOUR = colour;
+        *GPU_X = xc; *GPU_Y = yc; *GPU_PARAM0 = radius_x; *GPU_PARAM1 = radius_y;
+        wait_gpu();
+        *GPU_WRITE = 12 - ( filled & 1 );
     }
 }
 
@@ -462,9 +515,9 @@ void tm_cs( unsigned char tm_layer ) {
 }
 
 // SET THE BITMAPS FOR sprite_number in sprite_layer to the 8 x 16 x 16 pixel bitmaps ( 2048 ARRGGBB pixels )
-void set_sprite_bitmaps( unsigned char sprite_number, unsigned char *sprite_bitmaps ) {
+void set_sprite_bitmaps( unsigned char sprite_number, unsigned char *sprite_bitmaps, unsigned int bytes ) {
     *SPRITE_WRITER_NUMBER = sprite_number;
-    DMASTART( sprite_bitmaps, (void *restrict)SPRITE_WRITER_COLOUR, 2048, DMA_CPY_M_TO_S );
+    DMASTART( sprite_bitmaps, (void *restrict)SPRITE_WRITER_COLOUR, bytes, DMA_CPY_M_TO_S );
 }
 
 // SET SPRITE sprite_number in sprite_layer to active status, in colour to (x,y) with bitmap number tile ( 0 - 7 ) in sprite_attributes bit 0 size == 0 16 x 16 == 1 32 x 32 pixel size, bit 1 x-mirror bit 2 y-mirror
@@ -474,8 +527,12 @@ void set_sprite(unsigned char sprite_number, unsigned char active, short x, shor
     SPRITE_X[sprite_number] = x;
     SPRITE_Y[sprite_number] = y;
     SPRITE_ACTIONS[sprite_number] = sprite_attributes;
-}
 
+    // Calculate the physical screen space the engine needs to render
+    unsigned short base_size = (sprite_attributes & 64) ? 32 : 16;
+    unsigned short shift = (sprite_attributes >> 3) & 3;
+    SPRITE_SIZE[sprite_number] = (sprite_attributes & 32) ? (base_size >> shift) : (base_size << shift);
+}
 // SET or GET ATTRIBUTES for sprite_number in sprite_layer
 //  attribute == 0 active status ( 0 == inactive, 1 == active )
 //  attribute == 1 tile number ( 0 to 7 )
@@ -537,6 +594,41 @@ void sample_upload( unsigned char channel, unsigned short length, unsigned char 
     DMASTART( samples, (void *restrict)&AUDIO_SAMPLE[ channel ], length, DMA_CPY_M_TO_S );
 }
 
+// BACKGROUND COPPER
+void copper_startstop( unsigned char status ) {
+    await_vblank();
+    *BACKGROUND_COPPER_STARTSTOP = status;
+}
+
+void copper_program( unsigned short address, unsigned char command, unsigned char reg1, unsigned char flag, unsigned short reg2 ) {
+    *BACKGROUND_COPPER_ADDRESS = address;
+    *BACKGROUND_COPPER_OP = ( ( command & 0xf ) << 14 ) | ( ( reg1 & 0x7 ) << 11 ) | ( ( flag & 0x1 ) << 10 ) | ( reg2 & 0x3ff );
+    *BACKGROUND_COPPER_PROGRAM = 1;
+}
+
+void set_copper_cpuinput( unsigned short value ) {
+    *BACKGROUND_COPPER_CPUINPUT = value;
+}
+
+unsigned short get_copper_cpuoutput( void ) {
+    return( *BACKGROUND_COPPER_CPUOUTPUT );
+}
+
+void copper_memwrite( unsigned short value, unsigned short cell ) {
+    *BACKGROUND_COPPER_MEMADDR = cell;
+    *BACKGROUND_COPPER_MEMVALUE = value;
+}
+
+unsigned short copper_memread( unsigned short cell ) {
+    *BACKGROUND_COPPER_MEMADDR = cell;
+    return( *BACKGROUND_COPPER_MEMVALUE );
+}
+
+void copper_init_memory( unsigned short *memory, unsigned int number ) {
+    for( int i = 0; i < number; i++ )
+        copper_memwrite( memory[i], i );
+}
+
 // PAWS LOGO BLITTER TILE
 unsigned short PAWSLOGO[] = {
     0b0000000001000000,
@@ -591,3 +683,65 @@ unsigned short PAWSLOGO[] = {
 
 #define NORMAL 0
 #define BOLD 1
+
+// NEW CU BACKGROUND CO-PROCESSOR
+// OPCODES, NOTE OPCODE 0 IS MULTI-USE, JPL JSL AND SLI REQUIRE 1 OTHER ARGUMENT, THE LITERAL VALUE, JPx AND JSx REQUIRE 1 OTHER ARGUMENT, THE REGISTER WITH ADDRESS TO JUMP TO
+#define CU_JPL 0,0,1
+#define CU_JPR 0,0,0
+#define CU_JSL 0,1,1
+#define CU_JSR 0,0,0
+#define CU_RET 0,2,0,0
+#define CU_SLI 0,3,1
+#define CU_SR0 0,3,0,4
+#define CU_SR1 0,3,0,5
+#define CU_SR2 0,3,0,6
+#define CU_SR3 0,3,0,7
+#define CU_LR0 0,4,0,0
+#define CU_LR1 0,5,0,0
+#define CU_LR2 0,6,0,0
+#define CU_LR3 0,7,0,0
+#define CU_WAITACTIVE 0,4,1,0
+#define CU_WAITY 0,5,1
+#define CU_WAITX 0,6,1
+#define CU_WAITVB 0,7,1,0
+#define CU_SET 1
+#define CU_ADD 2
+#define CU_SUB 3
+#define CU_AND 4
+#define CU_OR  5
+#define CU_XOR 6
+#define CU_MUL 7
+#define CU_SHR 8
+#define CU_SEQ 9
+#define CU_SNE 9
+#define CU_ABS 10
+#define CU_SLT 11
+#define CU_SGE 11
+#define CU_SLE 12
+#define CU_SGT 12
+#define CU_MIN 13
+#define CU_MAX 13
+#define CU_LFM 14
+#define CU_STM 15
+#define CU_COND_INV(reg) ((reg) | 4)
+#define CU_MOD_MAX(val) ((val) | (1 << 9))
+
+// REGISTER NAMES { VBLANK, X, Y, RC, R0, R1, R2, R3 } WHEN READING ( RC, R0, R1, R2, R3 ) ALSO WHEN WRITING
+#define CU_RB 0
+#define CU_RX 1
+#define CU_RY 2
+#define CU_RC 3
+#define CU_R0 4
+#define CU_R1 5
+#define CU_R2 6
+#define CU_R3 7
+#define CU_RNG 8
+
+// BACKGROUND GENERATOR REGISTER NAMES { MODE, COLOUR, ALT COLOUR } REPLACE { VBLANK, X, Y } WHEN WRITING
+#define CU_BM 0
+#define CU_BC 1
+#define CU_BA 2
+
+// REG2 IS REG OR LITERAL
+#define CU_RR 0
+#define CU_RL 1

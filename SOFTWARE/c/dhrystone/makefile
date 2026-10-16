@@ -5,7 +5,7 @@ PROJECT=D-STONE
 PROJECTTYPE=TEST
 PRJSRC=$(wildcard *.c) $(wildcard *.cpp) $(wildcard *.s) $(wildcard *.h)
 PRJOBJ=dhry_1.o dhry_2.o
-CFLAGSEXTRA=-std=gnu17 -Wno-implicit-int -Wno-implicit-function-declaration -fweb -fsched-spec-load -frename-registers
+CFLAGSEXTRA=-std=gnu17 -Wno-implicit-int -Wno-implicit-function-declaration
 
 include ../makefile-paws.inc
 

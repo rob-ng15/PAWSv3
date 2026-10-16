@@ -414,10 +414,10 @@ C--------------------------------------------------------------------
 		return(1);
 	}
 
-	printf("Loops: %ld, Iterations: %d, Duration: %ld sec.\n",
-			LOOP, II, (finisec-startsec)/50000000);
+	printf("Loops: %ld, Iterations: %d, Duration: %f sec.\n",
+			LOOP, II, (finisec-startsec)/50000000.0);
 
-	KIPS = (100.0*LOOP*II)/(float)((finisec-startsec)/50000000);
+	KIPS = (100.0*LOOP*II)/(float)((finisec-startsec)/50000000.0);
 	if (KIPS >= 1000.0)
 		printf("C Converted Double Precision Whetstones: %.1f MIPS\n", KIPS/1000.0);
 	else

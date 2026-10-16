@@ -1,0 +1,80 @@
+Host_Init
+Added packfile /DEMO/id1/pak0.pak (339 files)
+FindFile: can't find gfx/pop.lmp
+Playing shareware version.
+PackFile: /DEMO/id1/pak0.pak : gfx.wad
+Console initialized.
+Exe: 07:15:10 Sep 22 2026
+16.0 megabyte heap
+PackFile: /DEMO/id1/pak0.pak : gfx/palette.lmp
+PackFile: /DEMO/id1/pak0.pak : gfx/colormap.lmp
+VID_Init: Resolution = 320 x 180
+          Display Buffer @ 0x02002580 (33564032)
+          Draw Buffer    @ 0x02020000 (33685504)
+8192k surface cache
+========Quake Initialized=========
+PackFile: /DEMO/id1/pak0.pak : quake.rc
+execing quake.rc
+PackFile: /DEMO/id1/pak0.pak : gfx/conback.lmp
+PackFile: /DEMO/id1/pak0.pak : default.cfg
+execing default.cfg
+Unknown command "volume"
+FindFile: can't find config.cfg
+couldn't exec config.cfg
+FindFile: can't find autoexec.cfg
+couldn't exec autoexec.cfg
+3 demo(s) in loop
+Playing demo from demo1.dem.
+PackFile: /DEMO/id1/pak0.pak : demo1.dem
+ERROR: couldn't open.
+PackFile: /DEMO/id1/pak0.pak : gfx/qplaque.lmp
+PackFile: /DEMO/id1/pak0.pak : gfx/ttl_main.lmp
+PackFile: /DEMO/id1/pak0.pak : gfx/mainmenu.lmp
+PackFile: /DEMO/id1/pak0.pak : gfx/menudot4.lmp
+PackFile: /DEMO/id1/pak0.pak : gfx/menudot5.lmp
+PackFile: /DEMO/id1/pak0.pak : gfx/menudot6.lmp
+PackFile: /DEMO/id1/pak0.pak : gfx/menudot1.lmp
+PackFile: /DEMO/id1/pak0.pak : gfx/menudot2.lmp
+PackFile: /DEMO/id1/pak0.pak : gfx/menudot3.lmp
+PackFile: /DEMO/id1/pak0.pak : gfx/ttl_sgl.lmp
+PackFile: /DEMO/id1/pak0.pak : gfx/sp_menu.lmp
+PackFile: /DEMO/id1/pak0.pak : progs.dat
+PackFile: /DEMO/id1/pak0.pak : maps/start.bsp
+PackFile: /DEMO/id1/pak0.pak : progs/player.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/eyes.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/h_player.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/gib1.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/gib2.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/gib3.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/s_bubble.spr
+PackFile: /DEMO/id1/pak0.pak : progs/s_explod.spr
+PackFile: /DEMO/id1/pak0.pak : progs/v_axe.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/v_shot.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/v_nail.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/v_rock.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/v_shot2.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/v_nail2.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/v_rock2.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/bolt.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/bolt2.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/bolt3.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/lavaball.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/missile.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/grenade.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/spike.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/s_spike.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/backpack.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/zom_gib.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/v_light.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/flame2.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/flame.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/zombie.mdl
+PackFile: /DEMO/id1/pak0.pak : progs/h_zombie.mdl
+
+VERSION 1.09 SERVER (24778 CRC)
+
+
+
+Introduction
+player entered the game
+Sys_Error: D_SCAlloc: bad cache size 0
