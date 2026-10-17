@@ -1515,7 +1515,7 @@ void update_sprite( unsigned char sprite_number, unsigned char kill, short dx, s
 
     short x = SPRITE_X[ sprite_number ] + dx;
     short y = SPRITE_Y[ sprite_number ] + dy;
-    unsigned short tile = SPRITE_TILE[ sprite_number ] + dt;
+    unsigned short tile = ( SPRITE_TILE[ sprite_number ] & 0xf8 ) + ( ( ( SPRITE_TILE[ sprite_number ] & 0x07 ) + dt ) & 0x07 );
     unsigned short active = SPRITE_ACTIVE[ sprite_number ];
 
     if( ( ( x > 640 ) || ( x < -size ) ) ) { active = ( kill & 1 ) ? 0 : 1; x = ( x > 640 ) ? -size : 640; }

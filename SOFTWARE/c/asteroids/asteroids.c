@@ -58,8 +58,30 @@ unsigned short ufo_directions[] = {
     0x1802, 0x181e, 0x1803, 0x181d
 };
 
-unsigned char sprite_sheet[] = {
-    #include "graphics/SPRITES.h"
+#define TILE_SHIP 0
+#define TILE_SHIP_SHIELD 8
+#define TILE_SHIP_EXPLODE 12
+#define TILE_ASTEROIDS 16
+#define TILE_EXPLOSIONS 32
+#define TILE_BULLET 40
+#define TILE_MISSILE 48
+#define TILE_UFO 56
+
+unsigned char sprite_sheet_ship[] = {
+    #include "graphics/ship.h"
+    #include "graphics/ufo.h"
+};
+unsigned char sprite_sheet_asteroids[] = {
+    #include "graphics/asteroids.h"
+};
+unsigned char sprite_sheet_explosions[] = {
+    #include "graphics/explosions.h"
+};
+unsigned char sprite_sheet_bullets[] = {
+    #include "graphics/bullets.h"
+};
+unsigned char sprite_sheet_ufo[] = {
+    #include "graphics/ufo.h"
 };
 unsigned char lower_tilemap_sheet[] = {
     #include "graphics/L_TILEMAP.h"
@@ -80,18 +102,23 @@ struct DrawList2D PlayerShip[] = {
 void program_background( void ) {
     copper_startstop( 0 );
 
-    copper_program( 0, CU_SET, CU_BM, CU_RL, BKG_SNOW );                                                                        // BACKGROUND SNOW GENERATOR
-    copper_program( 1, CU_SET, CU_BA, CU_RL, BLACK );                                                                           // BACKGROUND ALT BLACK
-    copper_program( 2, CU_SET, CU_BC, CU_RL, WHITE );                                                                           // BACKGROUND WHITE
+    copper_program( 0, CU_SET, CU_BM, CU_RL, BKG_SNOW );    tpu_set( 0, 2 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "00 SET BM <- BKG_SNOW     // SET MODE TO SNOW" );
+    copper_program( 1, CU_SET, CU_BA, CU_RL, BLACK );       tpu_set( 0, 3 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "01 SET BA <- BLACK        // SET ALT TO BLACK" );
+    copper_program( 2, CU_SET, CU_BC, CU_RL, WHITE );       tpu_set( 0, 4 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "02 SET BC <- WHITE        // SET COLOUR TO WHITE" );
 
-    copper_program( 3, CU_RND, CU_BC, CU_RL, 255 );                                                                             // SET BACKGROUND = RAND & 255
-    copper_program( 4, CU_JPL, 3 );                                                                                             // JUMP 3
+    copper_program( 3, CU_SET, CU_BC, CU_RR, CU_RNG );      tpu_set( 0, 5 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "03 SET BC <- RANDOM       // SET COLOUR TO RANDOM" );
+    copper_program( 4, CU_JPL, 3 );                         tpu_set( 0, 6 , TRANSPARENT, WHITE, TPU_NORMAL ); tpu_print( 1, "04 JPL 3                  // JUMP TO 3" );
 
     copper_startstop( 1 );
 }
 
 void set_sprites( void ) {
-    set_sprite_bitamps_from_spritesheet( 0, 32, &sprite_sheet[0], 0 );
+    set_sprite_bitmaps( TILE_SHIP, sprite_sheet_ship, 4096 );
+    set_sprite_bitmaps( TILE_ASTEROIDS, sprite_sheet_asteroids, 4096 );
+    set_sprite_bitmaps( TILE_EXPLOSIONS, sprite_sheet_explosions, 2048 );
+    set_sprite_bitmaps( TILE_BULLET, sprite_sheet_bullets, 4096 );
+    set_sprite_bitmaps( TILE_UFO, sprite_sheet_ufo, 2048 );
+
 }
 
 void set_tilemap( void ) {
@@ -191,7 +218,7 @@ void drawshield( unsigned char fullbar ) {
 void setup_game() {
     program_background();
     // CLEAR ALL SPRITES
-    for( unsigned char sprite_number = 0; sprite_number < 32; sprite_number++ ) {
+    for( unsigned char sprite_number = 0; sprite_number < 64; sprite_number++ ) {
         if( sprite_number < MAXASTEROIDS ) {
             asteroid_active[sprite_number] = 0; asteroid_direction[sprite_number] = 0;
         }
@@ -238,7 +265,7 @@ void __attribute__((interrupt ("machine"))) move_asteroids( void ) {
 
         // UFO
         if( asteroid_active[asteroid_number] == 3 ) {
-            set_sprite_attribute( asteroid_number, ATTR_SPRITE_TILE, 6 );
+            set_sprite_attribute( asteroid_number, ATTR_SPRITE_TILE, TILE_UFO );
             update_sprite_compat( asteroid_number, ufo_directions[ufo_leftright + ( level > 2 ? 2 : 0 )] );
             set_leds( ( SPRITE_X[ ufo_sprite_number ] < 0 ) ? 1 : ( SPRITE_X[ ufo_sprite_number ] > 639 ) ? 128 : ( 1 << ( ( 640 - SPRITE_X[ ufo_sprite_number ] ) / 80 ) ) );
             if( get_sprite_attribute( asteroid_number, ATTR_SPRITE_ACTIVE ) == 0 ) {
@@ -276,7 +303,7 @@ void draw_ship( void ) {
     set_sprite( SHIPSPRITE, shipexplode ? 0 : 1, shipx, shipy, ( shipdirection & 3 ) + ( shipmove ? 4 : 0 ), ROTATE0 + ( ( shipdirection & 12 ) >> 2 ) );
 
     // ENABLE SHIELD IF RESET OR SHIELD ACTIVE, ENABLE EXPLOSION IF NEEDED
-    set_sprite( SHIPSPRITE - 2, resetship | shipshield | shipexplode ? 1 : 0, shipx - ( resetship | shipshield ? 8 : 0 ), shipy - ( resetship | shipshield ? 8 : 0 ), ( counter & 3 ) + ( shipexplode ? 4 : 0 ), resetship | shipshield ? SPRITE_DOUBLE : 0 );
+    set_sprite( SHIPSPRITE - 2, resetship | shipshield | shipexplode ? 1 : 0, shipx - ( resetship | shipshield ? 8 : 0 ), shipy - ( resetship | shipshield ? 8 : 0 ), TILE_SHIP_SHIELD + ( counter & 3 ) + ( shipexplode ? 4 : 0 ), resetship | shipshield ? SPRITE_DOUBLE : 0 );
 }
 
 void move_ship() {
@@ -416,7 +443,7 @@ void fire_bullet( void ) {
             break;
     }
 
-    set_sprite( BULLETSPRITES + bulletnumber, 1, bulletx, bullety, 2, 0 );
+    set_sprite( BULLETSPRITES + bulletnumber, 1, bulletx, bullety, TILE_BULLET, 0 );
 
     beep( CHANNEL_LEFT_1, 4, 61, 128, 7 );
     last_fire = 20;
@@ -509,7 +536,7 @@ void spawn_asteroid( unsigned char asteroid_type, short xc, short yc ) {
         asteroid_active[ potentialnumber ] = asteroid_type;
         asteroid_direction[ potentialnumber ] = rng( ( asteroid_type == 2 ) ? 4 : 8 );
 
-        set_sprite( potentialnumber, 1, xc + rng(16) - 8, yc + rng(16) - 8, rng( 6 ), ( asteroid_type == 2 ? SPRITE_DOUBLE : 0 ) + rng( 8 ) );
+        set_sprite( potentialnumber, 1, xc + rng(16) - 8, yc + rng(16) - 8, TILE_ASTEROIDS + rng( 16 ), ( asteroid_type == 2 ? SPRITE_DOUBLE : 0 ) + rng( 8 ) );
     }
 }
 
@@ -541,7 +568,7 @@ void check_ufo_bullet_hit( void ) {
             }
 
             // SET EXPLOSION TILE
-            set_sprite_attribute( asteroid_hit, ATTR_SPRITE_TILE, 7 );
+            set_sprite_attribute( asteroid_hit, ATTR_SPRITE_TILE, TILE_EXPLOSIONS + rng( 8 ) );
             asteroid_active[asteroid_hit] = 32;
         }
     }
@@ -584,7 +611,7 @@ void check_hit( void ) {
                             }
                         }
 
-                        set_sprite( asteroid_hit, 1, x, y, 7, get_sprite_attribute( ( asteroid_hit ), ATTR_SPRITE_ACTION ) );
+                        set_sprite( asteroid_hit, 1, x, y, TILE_EXPLOSIONS + rng( 8 ), get_sprite_attribute( ( asteroid_hit ), ATTR_SPRITE_ACTION ) );
                         asteroid_active[asteroid_hit] = 32;
                         break;
 
@@ -596,7 +623,7 @@ void check_hit( void ) {
 
                         x = get_sprite_attribute( asteroid_hit, ATTR_SPRITE_X );
                         y = get_sprite_attribute( asteroid_hit, ATTR_SPRITE_Y );
-                        set_sprite_attribute( asteroid_hit, ATTR_SPRITE_TILE, 7 );
+                        set_sprite_attribute( asteroid_hit, ATTR_SPRITE_TILE, TILE_EXPLOSIONS + rng( 8 ) );
                         ufo_sprite_number = 0xff; sample_change = 1;
                         asteroid_active[asteroid_hit] = 32;
                         // AVOID BONUS FUEL AND SHIELD
@@ -627,7 +654,7 @@ void check_crash( void ) {
         }
         beep( CHANNEL_LEFT_1, 4, 1, 1000, 7 );
         shipexplode = 1;
-        set_sprite_attribute( UFOBULLETSPRITE, ATTR_SPRITE_TILE, 0 );
+        set_sprite_attribute( UFOBULLETSPRITE, ATTR_SPRITE_TILE, TILE_SHIP_EXPLODE );
         resetship = 75;
     }
 }
@@ -702,7 +729,7 @@ int main( void ) {
                 } while( ( ufo_y >= shipy - 64 ) && ( ufo_y <= shipy + 64 ) );
 
                 ufo_leftright = rng( 2 );
-                set_sprite( ufo_sprite_number, 1, ( ufo_leftright == 1 ) ? 639 : ( level < 2 ) ? -31 : -15, ufo_y, 6, ( level < 2 ) ? SPRITE_DOUBLE : 0 );
+                set_sprite( ufo_sprite_number, 1, ( ufo_leftright == 1 ) ? 639 : ( level < 2 ) ? -31 : -15, ufo_y, TILE_UFO + rng(2), ( level < 2 ) ? SPRITE_DOUBLE : 0 );
                 set_leds( ( SPRITE_X[ ufo_sprite_number ] < 0 ) ? 1 : 128 );
                 asteroid_active[ ufo_sprite_number ] = 3; sample_change = 2;
                 set_timer1khz( 10000, 0 );
@@ -734,7 +761,7 @@ int main( void ) {
                 default:
                     break;
             }
-            set_sprite( UFOBULLETSPRITE, 1, ufo_x, ufo_y, 0, 0 );
+            set_sprite( UFOBULLETSPRITE, 1, ufo_x, ufo_y, TILE_MISSILE, 0 );
         }
 
         if( ( lives > 0 ) && ( resetship == 0) ) {
