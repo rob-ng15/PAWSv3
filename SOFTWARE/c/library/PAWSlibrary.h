@@ -1,7 +1,7 @@
 #ifndef __PAWSLIBRARY__
 #include <stddef.h>
-#include <PAWSintrinsics.h>
-#include <PAWSdefinitions.h>
+#include "PAWSintrinsics.h"
+#include "PAWSdefinitions.h"
 
 // MEMORY
 extern unsigned char *MEMORYTOP;

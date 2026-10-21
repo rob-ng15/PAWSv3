@@ -60,7 +60,8 @@ $$end
     output  uint1 TIMER_VALID(0)
 ) <reginputs> {
     uint1   MAGICVALUE = 0;                                                                                                     // WRITE 32h50415357 'PAWS' } TO ALLOW WRITING TO SDCARD SECTOR 0
-    uint64  LATCHrtc = uninitialised;                                                                                           // LATCH RTC ON READ SO VALUE IS RETURNED FOR 64 BIT READ
+    uint64  LATCHrtc = uninitialised;                                                                                           // LATCH RTC ON READ TO RETURN 64 BIT READ
+    uint16  TIMER_ADD[4] = { 50000, 5000, 500, 50 };
 
 $$if not SIMULATION then
     // UART CONTROLLER, CONTAINS BUFFERS FOR INPUT/OUTPUT
@@ -154,7 +155,7 @@ $$end
                             case 4hf: { switch( ADDR[2,2] ) {
                                 case 0: { IRQ_TIMER[0,32] = WDATA; TIMER_VALID = 0; }                                               // SET LOWER 32 BITS OF IRQ TIMER COMPARATOR
                                 case 1: { IRQ_TIMER[32,$CWIDTH-32$] = WDATA; TIMER_VALID = 1; }                                     //  UPPER BITS OF IRQ TIMER COMPARATOR
-                                case 2: { IRQ_TIMER = RDTIME + ( 50000000 >> WDATA[0,2] ); TIMER_VALID = 1; }                       // SET NEXT TIMER == 0 1/second, == 1 10/second, == 2 100/second
+                                case 2: { IRQ_TIMER = RDTIME + TIMER_ADD[WDATA[0,2]]; TIMER_VALID = 1; }                            // SET NEXT TIMER 1, 0.1, 0.01, 0.001 seconds
                                 case 3: { IRQ_TIMER = RDTIME + WDATA; TIMER_VALID = 1; }                                            // SET NEXT TIMER + ( 32 bit ) WDATA
                             } }
                             default: {}

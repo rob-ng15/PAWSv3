@@ -76,6 +76,7 @@ unsigned char PAWSKEYtoDOOM( unsigned short keycode ) {
     }
 }
 
+extern void I_UpdateSound (void);
 void I_StartTic (void) {
     event_t event; unsigned short keycode, doomkeycode;
     static short joystick_buttons, old_joystick_buttons;
@@ -99,6 +100,8 @@ void I_StartTic (void) {
         D_PostEvent( &event );
     }
     old_joystick_buttons = joystick_buttons;
+
+    I_UpdateSound();
 }
 
 void I_UpdateNoBlit (void) {

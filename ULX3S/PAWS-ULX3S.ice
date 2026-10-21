@@ -107,8 +107,8 @@ $include('../circuitry.si')
 //              do_float_sqrt do_float_sqrt_radix4 do_float_sqrt_radix8
 
 $$ INT_DIVIDE = "dointegerdivide_radix8"
-$$ FP_DIVIDE = "do_float_divide_radix8"
-$$ FP_SQRT = "do_float_sqrt_radix8"
+$$ FP_DIVIDE = "do_float_divide_radix4"
+$$ FP_SQRT = "do_float_sqrt_radix4"
 
 // CPU
 $$CPUISA = 0x4001102F

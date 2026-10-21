@@ -1342,7 +1342,7 @@ void spritedemo( void ) {
         }
     }
 
-    // SET COLOUR SPRITE OBJECTS - GHOSTS FROM PACMAN - NON-POWER UP
+    // SET COLOUR SPRITE OBJECTS - GHOSTS FROM PACMAN - NON-POWER UP, TILES 0, 8, 16, 24
     unsigned char colour;
     for( short i = 0; i < 4; i++ ) {
         for( short y = 0; y < 128; y++ ) {
@@ -1377,41 +1377,39 @@ void spritedemo( void ) {
                 colour_sprite_bitmap[ y * 16 + x ] = colour;
             }
         }
-        set_sprite_bitmaps( i * 4, &colour_sprite_bitmap[ 0 ] );
+        set_sprite_bitmaps( i * 8, &colour_sprite_bitmap[ 0 ], 2048 );
     }
 
-    // SET COLOUR SPRITE OBJECTS - GHOSTS FROM PACMAN - POWER UP
-    for( short i = 0; i < 4; i++ ) {
-        for( short y = 0; y < 128; y++ ) {
-            for( short x = 0; x < 16; x++ ) {
-                switch( power_ghost_strings[ y ][x] ) {
-                    case '.':
-                        colour = TRANSPARENT;
-                        break;
-                    case 'b':
-                        colour = BLUE;
-                        break;
-                    case 'P':
-                        colour = 237;
-                        break;
-                    case 'W':
-                        colour = WHITE;
-                        break;
-                }
-                colour_sprite_bitmap[ y * 16 + x ] = colour;
+    // SET COLOUR SPRITE OBJECTS - GHOSTS FROM PACMAN - POWER UP, TILES 32
+    for( short y = 0; y < 128; y++ ) {
+        for( short x = 0; x < 16; x++ ) {
+            switch( power_ghost_strings[ y ][x] ) {
+                case '.':
+                    colour = TRANSPARENT;
+                    break;
+                case 'b':
+                    colour = BLUE;
+                    break;
+                case 'P':
+                    colour = 237;
+                    break;
+                case 'W':
+                    colour = WHITE;
+                    break;
             }
+            colour_sprite_bitmap[ y * 16 + x ] = colour;
         }
-        set_sprite_bitmaps( i * 4 + 2, &colour_sprite_bitmap[ 0 ] );
     }
+    set_sprite_bitmaps( 32, &colour_sprite_bitmap[ 0 ], 2048 );
 
-    // 0, 4, 8, 12 SPRITES GHOST NON-POWER, 2, 6, 10, 14 SPRITES GHOST POWER
-    set_sprite( 0, 1, 144, 64, 0, SPRITE_DOUBLE );     set_sprite( 2, 0, 144, 64, 0, SPRITE_DOUBLE );
-    set_sprite( 4, 1, 464, 64, 2, SPRITE_DOUBLE );     set_sprite( 6, 0, 464, 64, 2, SPRITE_DOUBLE );
-    set_sprite( 8, 1, 464, 384, 4, SPRITE_DOUBLE );    set_sprite( 10, 0, 464, 384, 4, SPRITE_DOUBLE );
-    set_sprite( 12, 1, 144, 384, 6, SPRITE_DOUBLE );    set_sprite( 14, 0, 144, 384, 6, SPRITE_DOUBLE );
+    // 0, 1, 2, 3 GHOSTS
+    set_sprite( 0, 1, 144, 64, 0, SPRITE_DOUBLE );
+    set_sprite( 1, 1, 464, 64, 8, SPRITE_DOUBLE );
+    set_sprite( 2, 1, 464, 384, 16, SPRITE_DOUBLE );
+    set_sprite( 3, 1, 144, 384, 24, SPRITE_DOUBLE );
 
-    set_sprite_bitmaps( 16, &pacman_bitmap[0] );
-    set_sprite( 16, 1, 304, 415, 0, 1 );
+    set_sprite_bitmaps( 40, &pacman_bitmap[0], 2048 );
+    set_sprite( 4, 1, 304, 415, 40, 1 );
 
     for( short i = 0; i < 1280; i++ ) {
         await_vblank_finish(); await_vblank();
@@ -1432,46 +1430,36 @@ void spritedemo( void ) {
         }
 
         // ANIMATE PACMAN
-        set_sprite_attribute( 16, ATTR_SPRITE_TILE, ( ( animation_count & 96 ) >> 5 ) );
-        set_sprite_attribute( 16, ATTR_SPRITE_ACTION, ghost_direction[1] + SPRITE_DOUBLE + ROTATE0 );
+        set_sprite_attribute( 4, ATTR_SPRITE_TILE, 40 + ( ( animation_count & 96 ) >> 5 ) );
+        set_sprite_attribute( 4, ATTR_SPRITE_ACTION, ghost_direction[1] + SPRITE_DOUBLE + ROTATE0 );
 
         // ANIMATE THE GHOSTS
         for( short i = 0; i < 4; i++ ) {
             if( power ) {
                 for( short i = 0; i < 4; i++ ) {
-                    // TURN OFF NON-POWER UP SPRITE, TURN ON POWER UP SPRITE AND ANIMATE
-                    set_sprite_attribute( i * 4, ATTR_SPRITE_ACTIVE, 0 );
-                    set_sprite_attribute( i * 4 + 2, ATTR_SPRITE_ACTIVE, 1 );
-                    set_sprite_attribute( i * 4 + 2, ATTR_SPRITE_TILE, ( ( move_count < 140 ) ? 0 : 1 ) * 2 + ghost_animation_frame );
+                    set_sprite_attribute( i, ATTR_SPRITE_TILE, 32 + ( ( move_count < 140 ) ? 0 : 1 ) * 2 + ghost_animation_frame );
                 }
             } else {
                 for( short i = 0; i < 4; i++ ) {
-                    // TURN ON NON-POWER UP SPRITE AND ANIMATE, TURN OFF POWER UP SPRITE
-                    set_sprite_attribute( i * 4, ATTR_SPRITE_TILE, ghost_direction[i] * 2 + ghost_animation_frame );
-                    set_sprite_attribute( i * 4, ATTR_SPRITE_ACTIVE, 1 );
-                    set_sprite_attribute( i * 4 + 2, ATTR_SPRITE_ACTIVE, 0 );
+                    set_sprite_attribute( i, ATTR_SPRITE_TILE, i * 8 + ghost_direction[i] * 2 + ghost_animation_frame );
                 }
             }
         }
 
         // MOVE THE GHOSTS
-        for( short i = 0; i <4; i++ ) {
+        for( short i = 0; i < 4; i++ ) {
             switch( ghost_direction[i] ) {
                 case 0:
-                    update_sprite( i * 4,     0, 1, 0, 0 );
-                    update_sprite( i * 4 + 2, 0, 1, 0, 0 );
+                    update_sprite( i, 0, 1, 0, 0 );
                     break;
                 case 1:
-                    update_sprite( i * 4,     0, 0, 1, 0 );
-                    update_sprite( i * 4 + 2, 0, 0, 1, 0 );
+                    update_sprite( i, 0, 0, 1, 0 );
                     break;
                 case 2:
-                    update_sprite( i * 4,     0, -1, 0, 0 );
-                    update_sprite( i * 4 + 2, 0, -1, 0, 0 );
+                    update_sprite( i, 0, -1, 0, 0 );
                     break;
                 case 3:
-                    update_sprite( i * 4,     0, 0, -1, 0 );
-                    update_sprite( i * 4 + 2, 0, 0, -1, 0 );
+                    update_sprite( i, 0, 0, -1, 0 );
                     break;
             }
         }

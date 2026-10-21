@@ -218,15 +218,15 @@ unit audio_$i$(
     dualport_bram uint13 frequency_table[128] = {
         0,                                                                                                                      // FREQUENCY TABLE3 = c 2 , 5 = c#2, 7 = d 2...
         6328,6144,5972,5800,5638,5474,5320,5168,5022,4878,4740,4604,
-        4474,4344,4224,4102,3986,3870,3762,3654,3552,3448,3352,3056,
+        4474,4344,4224,4102,3986,3870,3762,3654,3552,3448,3352,3256,
         3164,3072,2986,2900,2819,2737,2660,2584,2511,2439,2370,2302,
-        2237,2172,2112,2051,1993,1935,1881,1827,1776,1724,1676,1528,
+        2237,2172,2112,2051,1993,1935,1881,1827,1776,1724,1676,1628,
         1582,1536,1493,1450,1410,1369,1330,1292,1256,1220,1185,1151,
-        1119,1086,1056,1026,997,968,941,914,888,862,838,764,
+        1119,1086,1056,1026,997,968,941,914,888,862,838,814,
         791,768,747,725,705,684,665,646,628,610,593,576,
-        559,543,528,513,498,484,470,457,444,431,419,382,
+        559,543,528,513,498,484,470,457,444,431,419,407,
         396,384,373,363,352,342,333,323,314,305,296,288,
-        280,272,264,256,249,242,235,228,222,216,210,191,
+        280,272,264,256,249,242,235,228,222,216,210,204,
         198,192,187,181,176,171,166
     };
     uint7               SAMP0P1 <:: samples.addr0 + 1;                                                                          // NEXT ADDRESS IN DOOM PC SPEAKER SAMPLES
@@ -299,8 +299,8 @@ unit apu_$i$(                                                                   
     audiocounter COUNTER( PULSE_1KHZ <: PULSE_1KHZ, selected_frequency <: frequency, selected_duration <: duration, start <: apu_write, active :> audio_active );
 
     always {
-        if( COUNTER.updatepoint ) { audio_output = ( WAVEFORM.audio_output * ( volume + 1 ) ) >> 3; }
-    }
+        if( apu_write & ~|frequency ) { audio_output = 0; }
+        if( COUNTER.updatepoint ) { audio_output = ( WAVEFORM.audio_output * ( volume + 1 ) ) >> 3; }    }
 }
 
 unit waveform_$i$(
@@ -324,7 +324,7 @@ unit waveform_$i$(
 
     always {
         switch( selected_waveform ) {
-            case 0: { audio_output = point[7,1] ? 255 : 127; }                                                                  // SQUARE
+            case 0: { audio_output = point[7,1] ? 255 : 0; }                                                                    // SQUARE
             case 1: { audio_output = point[0,8]; }                                                                              // SAWTOOTH
             case 2: { audio_output = { TRIANGLE, 1b0 }; }                                                                       // TRIANGLE
             case 3: { audio_output = sine.rdata$i$; }                                                                           // SINE
@@ -354,7 +354,7 @@ unit audiocounter(
     uint16              duration_NEXT <:: duration - 1;
     uint1               IS_ACTIVE <:: |duration;
 
-    active := IS_ACTIVE; updatepoint := IS_ACTIVE & ~|counter50mhz;
+    active := IS_ACTIVE; updatepoint := IS_ACTIVE & ( |selected_frequency ) & ~|counter50mhz;
 
     always {
         counter50mhz = start ? 0 : updatepoint ? selected_frequency : counter50mhz_NEXT;
@@ -435,7 +435,7 @@ unit audio_pwm(
                 //            case 7: { sample = ( samples * 585 ) >> 12; }
             }
         } -> {
-            pwm = sample[4,4] + ( RDTIME[0,4] < sample[0,4] );
+            pwm = sample[4,4] + ( (~&sample[4,4]) & ( RDTIME[0,4] < sample[0,4] ) );
         }
     }
 }

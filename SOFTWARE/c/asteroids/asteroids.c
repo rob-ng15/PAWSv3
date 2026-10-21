@@ -69,7 +69,6 @@ unsigned short ufo_directions[] = {
 
 unsigned char sprite_sheet_ship[] = {
     #include "graphics/ship.h"
-    #include "graphics/ufo.h"
 };
 unsigned char sprite_sheet_asteroids[] = {
     #include "graphics/asteroids.h"

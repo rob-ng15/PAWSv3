@@ -9,6 +9,15 @@ unit timers_memmap(
 
     output  uint16              static16bit                                                                                     // RNG
 ) <reginputs> {
+    uint7 float_exp <:: RNG.u_noise_out[15,1] ? 7d126 :
+                        RNG.u_noise_out[14,1] ? 7d125 :
+                        RNG.u_noise_out[13,1] ? 7d124 :
+                        RNG.u_noise_out[12,1] ? 7d123 :
+                        RNG.u_noise_out[11,1] ? 7d122 :
+                        RNG.u_noise_out[10,1] ? 7d121 :
+                        RNG.u_noise_out[ 9,1] ? 7d120 :
+                        RNG.u_noise_out[ 8,1] ? 7d119 : 7d118;
+
     random RNG( g_noise_out :> static16bit );                                                                                   // RNG random number generator
     timesinceboot P1();                                                                                                         // SYSTEMCLOCK
     P1.resettime := 0;
@@ -35,7 +44,10 @@ unit timers_memmap(
                         switch( ADDR[1,2] ) {
                             default: { RDATA = RNG.g_noise_out; }                                                               // RANDOM NUMBER GENERATOR 0
                             case 4h1: { RDATA = RNG.u_noise_out; }                                                              // RANDOM NUMBER GENERATOR 1
-                            case 4h2: { RDATA = { RNG.u_noise_out[0,7], RNG.g_noise_out, RNG.u_noise_out[7,7] }; }              // COMBINE TO FLOATING POINT RNG
+                            case 2h2: {                                                                                         // FLOAT RANDOM NUMBER 0.0 -> 1.0
+                                RDATA = ( |float_exp ) ? { 2b00, float_exp, RNG.g_noise_out, RNG.u_noise_out[0,7] } :
+                                                         32h00000000;
+                            }
                         }
                     }
                 }
@@ -66,20 +78,22 @@ unit timesinceboot(
     output  uint20              counter1mhz(0),
     input   uint1               resettime
 ) <reginputs> {
-    uint6               counter50mhz = uninitialised;
+    uint6               counter50mhz = 49;
     uint6               counter50mhz_m1 <:: counter50mhz - 1;
     uint20              counter1mhz_p1 <:: counter1mhz + 1;
     uint$CWIDTH$        counter1hz_p1 <:: counter1hz + 1;
-    uint2               ACTION <:: { counter1mhz == 999999, ~|counter50mhz };
+    uint1               END_OF_SECOND <:: ( counter1mhz == 999999 );
 
     always {
         if( resettime ) {
-            counter1hz = newtime; counter1mhz = 0; counter50mhz = 50;
+            counter1hz = newtime; counter1mhz = 0; counter50mhz = 49;
         } else {
-            switch( ACTION ) {
-                case 2b00: { counter50mhz = counter50mhz_m1; }
-                case 2b01: { counter1mhz = counter1mhz_p1; counter50mhz = 49; }
-                default: { counter1hz = counter1hz_p1; counter1mhz = 0; counter50mhz = 49; }
+            if( ~|counter50mhz ) {
+                counter50mhz = 49;
+                counter1mhz = END_OF_SECOND ? 0 : counter1mhz_p1;
+                if( END_OF_SECOND ) { counter1hz = counter1hz_p1; }
+            } else {
+                counter50mhz = counter50mhz_m1;
             }
         }
     }
@@ -107,7 +121,7 @@ unit random(
         } -> {
             temp_u_noise2 = temp_u_noise3;
         } -> {
-            temp_u_noise3 = { rand_ff[15,1], rand_ff[15,1], rand_ff[2,13] };
+            temp_u_noise3 = { rand_ff[15,1], rand_ff[15,1], rand_ff[2,14] };
         } -> {
             g_noise_out = ( rand_en_ff[17,1] ) ? ( temp_u_noise3 + temp_u_noise2 + temp_u_noise1 + temp_u_noise0 + ( rand_en_ff[9,1] ? g_noise_out : 0 ) ) :
                           ( rand_en_ff[10,1] ) ? rand_ff : g_noise_out;
