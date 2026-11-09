@@ -15,7 +15,12 @@ unit dma_flags(
     input   uint2   COUNT,                                                                                                      // LOW 2 BITS OF COUNT
     input   uint1   mode_set,                                                                                                   // 1 = SET, 0 = COPY
     input   uint1   mode_stride,                                                                                                // 1 = USES SRCADD/DESTADD STRIDE
-    output  uint2   ACCESSSIZE                                                                                                  // 2b10 = 32-BIT, 2b01 = 16-BIT, 2b00 = 8-BIT
+    output  uint2   ACCESSSIZE,                                                                                                 // 2b10 = 32-BIT, 2b01 = 16-BIT, 2b00 = 8-BIT
+
+    // Exported flags for 0-wait burst writes
+    output  uint1   IS_DEST_BRAM,
+    output  uint1   IS_DEST_16IO,
+    output  uint1   IS_DEST_32IO
 ) <reginputs> {
     uint1   DEST_BRAM <:: ( ~|DESTHIGH & ~DMADEST[15,1] );                                                                      // DESTINATION IS BRAM
     uint1   SRC_BRAM  <:: ( ~|SRCHIGH & ~DMASRC[15,1] );                                                                        // SOURCE IS BRAM
@@ -37,6 +42,11 @@ unit dma_flags(
     uint1   CAN16     <:: DEST16 & COUNT16 & ( mode_set | SRC16 ) & ( ~mode_stride | ( DESTADD16 & ( mode_set | SRCADD16 ) ) );
 
     ACCESSSIZE := CAN32 ? 2b10 : CAN16 ? 2b01 : 2b00;
+
+    // Route internal flags to outputs
+    IS_DEST_BRAM := DEST_BRAM;
+    IS_DEST_16IO := DEST_16IO;
+    IS_DEST_32IO := DEST_32IO;
 }
 
 unit dma(                                                                                                                       // UNIFIED LINEAR & RECTANGLE DMA CONTROLLER
@@ -61,12 +71,13 @@ unit dma(                                                                       
     input   uint1               MEM_BUSY,
     input   uint1               MEM_ACK
 ) <reginputs> {
-    uint5               STATE = 1;
-                        $$ STATE_DMA_IDLE       = 1
-                        $$ STATE_DMA_START      = 2
-                        $$ STATE_DMA_READ_WAIT  = 4
-                        $$ STATE_DMA_WRITE_WAIT = 8
-                        $$ STATE_DMA_NEXT_LINE  = 16
+    uint6               STATE = 1;
+    $$ STATE_DMA_IDLE       = 1
+    $$ STATE_DMA_START      = 2
+    $$ STATE_DMA_READ_WAIT  = 4
+    $$ STATE_DMA_WRITE_WAIT = 8
+    $$ STATE_DMA_NEXT_LINE  = 16
+    $$ STATE_DMA_WAIT_BUS   = 32
 
     uint1               IS_RECT <:: |DMAMODE[6,2];                                                                              // 4h4 (SET RECT) OR 4h8 (COPY RECT)
     uint1               IS_SET  <:: DMAMODE[4,1] | DMAMODE[6,1];                                                                // 4h1 (SET)      OR 4h4 (SET RECT)
@@ -99,10 +110,28 @@ unit dma(                                                                       
     uint$addr_width$    dmadest_NEXTCYCLE <:: dmadest + DMADESTADD - DMACOUNT;
     uint8               dmacycles_NEXT    <:: dmacycles - 1;
 
-    uint1               WAIT_MEM <:: MEM_RENABLE | MEM_WENABLE | MEM_BUSY;
+    // Extract the 64KB memory page prefix (bits 16 to 26)
+    // e.g., 0x2000000 becomes 11h200
+    uint11 dest_page <:: dmadest[16,11];
+
+    // Explicitly flag the user's BRAM buffers for 0-wait burst writes
+    uint1 is_user_bram <:: ( dest_page == 11h200 ) | ( dest_page == 11h201 ) | // 0x2000000 - 0x201FFFF (FRAMEBUFFER0, 128KB max)
+                            ( dest_page == 11h202 ) | ( dest_page == 11h203 ) | // 0x2020000 - 0x203FFFF (FRAMEBUFFER1, 128KB max)
+                            ( dest_page == 11h100 ) |                           // 0x1000000 - 0x100FFFF (TPUBUFFER, 64KB max)
+                            ( dest_page == 11h080 ) | ( dest_page == 11h081 );  // 0x0800000 - 0x081FFFF (TMAPBUFFER 0-3, 128KB total)
+    // Combine standard BRAM/IO flags with the new custom BRAM ranges
+    uint1 safe_fast_write <:: FLAGS.IS_DEST_BRAM | FLAGS.IS_DEST_16IO | FLAGS.IS_DEST_32IO | is_user_bram;
+    uint2               pipeline_wait = 0;
+
+    // Hold WAIT_MEM active while the pipeline delay burns off
+    uint1               WAIT_MEM <:: MEM_RENABLE | MEM_WENABLE | (|pipeline_wait) | MEM_BUSY;
+
+    MEM_RENABLE := 0;
+    MEM_WENABLE := 0;
 
     always {
-        if( MEM_ACK ) { MEM_RENABLE = 0; MEM_WENABLE = 0; }
+        // Enforce the pipeline delay countdown natively
+        if( |pipeline_wait ) { pipeline_wait = pipeline_wait - 1; }
 
         onehot( STATE ) {
             case 0: {                                                                                                           // STATE_DMA_IDLE
@@ -117,6 +146,12 @@ unit dma(                                                                       
 
                 if( DMASTART & |DMAMODE[4,4] ) {
                     DMAACTIVE = 1;
+                    STATE = $STATE_DMA_WAIT_BUS$;
+                }
+            }
+
+            case 5: {                                                                                                           // STATE_DMA_WAIT_BUS
+                if( MEM_ACK ) {
                     STATE = $STATE_DMA_START$;
                 }
             }
@@ -126,10 +161,12 @@ unit dma(                                                                       
                     if( mode_set ) {
                         MEM_ADDR = dmadest;
                         MEM_WENABLE = 1;
+                        pipeline_wait = safe_fast_write ? 0 : 3;
                         STATE = $STATE_DMA_WRITE_WAIT$;
                     } else {
                         MEM_ADDR = dmasrc;
                         MEM_RENABLE = 1;
+                        pipeline_wait = 3; // Reads always wait 3 cycles
                         STATE = $STATE_DMA_READ_WAIT$;
                     }
                 } else {
@@ -143,6 +180,7 @@ unit dma(                                                                       
                     MEM_ADDR = dmadest;
                     MEM_WDATA = |FLAGS.ACCESSSIZE ? MEM_RDATA : MEM_RDATA[ { dmasrc[0,1], 3b000 }, 8 ];
                     MEM_WENABLE = 1;
+                    pipeline_wait = safe_fast_write ? 0 : 3;
                     STATE = $STATE_DMA_WRITE_WAIT$;
                 }
             }
@@ -154,7 +192,16 @@ unit dma(                                                                       
                     dmacount = dmacount_NEXT;
 
                     if( |dmacount_NEXT ) {
-                        STATE = $STATE_DMA_START$;
+                        if( mode_set ) {
+                            MEM_ADDR = dmadest_NEXT;
+                            MEM_WENABLE = 1;
+                            pipeline_wait = safe_fast_write ? 0 : 3;
+                        } else {
+                            MEM_ADDR = dmasrc_NEXT;
+                            MEM_RENABLE = 1;
+                            pipeline_wait = 3; // Reads always wait 3 cycles
+                            STATE = $STATE_DMA_READ_WAIT$;
+                        }
                     } else {
                         if( |dmacycles_NEXT ) {
                             STATE = $STATE_DMA_NEXT_LINE$;
@@ -175,7 +222,7 @@ unit dma(                                                                       
             }
         }
 
-        if( reset ) { DMAACTIVE = 0; MEM_RENABLE = 0; MEM_WENABLE = 0; STATE = $STATE_DMA_IDLE$; }
+        if( reset ) { DMAACTIVE = 0; STATE = $STATE_DMA_IDLE$; pipeline_wait = 0; }
     }
 }
 

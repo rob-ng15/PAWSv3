@@ -295,9 +295,29 @@ unit uart_OUT(
         first :> uo.data_in
     );
 
+    uint2 state = 0;
+
     always {
-        OUT.read = OUT.available & !uo.busy;
-        uo.data_in_ready = OUT.available & ( !uo.busy );
+        OUT.read = 0;
+        uo.data_in_ready = 0;
+
+        switch( state ) {
+            case 0: {
+                if( OUT.available & ~uo.busy ) {
+                    uo.data_in_ready = 1;
+                    OUT.read = 1;
+                    state = 1;
+                }
+            }
+            case 1: {
+                // Wait for the UART sender to acknowledge and assert busy
+                if( uo.busy ) { state = 2; }
+            }
+            case 2: {
+                // Wait for the UART sender to finish the character
+                if( ~uo.busy ) { state = 0; }
+            }
+        }
     }
 }
 

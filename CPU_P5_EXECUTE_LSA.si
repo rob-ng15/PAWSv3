@@ -48,8 +48,13 @@ unit cpu_execute_lsa(
     uint1               IS_LR <:: $EX_LSA_IS_ATOMIC$ & ~$EX_LSA_IS_STORE$;
     uint1               IS_SC <:: $EX_LSA_IS_ATOMIC$ & ~$EX_LSA_IS_LOAD$;
     uint1               IS_FS <:: ( ( EXECUTE_LSA_INSTRUCTION[2,5] == 5b00010 ) & EXECUTE_LSA_INSTRUCTION[13,1] ) | EXECUTE_LSA_INSTRUCTION[2,1];
+    uint3 SIZE_LOAD <:: $EX_LSA_IS_CUSTOM$ ? EXECUTE_LSA_INSTRUCTION[29,3] : Rtype( EXECUTE_LSA_INSTRUCTION ).f3;
+    uint1 SIGN_X <:: $EX_LSA_IS_WR_F$ | ( ~SIZE_LOAD[2,1] & MEM_RDATA[~|SIZE_LOAD[0,2] ? 7 : SIZE_LOAD[0,1] ? 15 : 31, 1] );
+
     cpu_load LOAD(
         IS_SC <: IS_SC,
+        SIGN_X <: SIGN_X,
+        CPU_SIZE_LOAD <: SIZE_LOAD,
         CPU_ADDR_LOAD <: EXECUTE_LSA_ADDRESS,
         CPU_FLOAT_LOAD <: $EX_LSA_IS_WR_F$,
         MEM_ADDR_LOAD :> MEM_ADDR_LOAD,
@@ -73,7 +78,6 @@ unit cpu_execute_lsa(
         MEM_ACK_STORE <: MEM_ACK_STORE
     );
 
-    LOAD.CPU_SIZE_LOAD := $EX_LSA_IS_CUSTOM$ ? EXECUTE_LSA_INSTRUCTION[29,3] : Rtype( EXECUTE_LSA_INSTRUCTION ).f3;
     STORE.CPU_SIZE_STORE := $EX_LSA_IS_CUSTOM$ ? EXECUTE_LSA_INSTRUCTION[29,2] : Rtype( EXECUTE_LSA_INSTRUCTION ).f3[0,2];
 
     LOAD.START := 0;
@@ -174,6 +178,7 @@ unit cpu_load(
     input   uint1               IS_SC,
     input   uint$addr_width$    CPU_ADDR_LOAD,
     input   uint3               CPU_SIZE_LOAD,
+    input   uint1               SIGN_X,
     input   uint1               CPU_FLOAT_LOAD,
     output  uint64              CPU_RDATA,
     output  uint$addr_width$    MEM_ADDR_LOAD,
@@ -186,7 +191,6 @@ unit cpu_load(
     output  uint1               BUSY
 ) <reginputs> {
     uint4               STATE = 1;
-    uint1               SIGN_X <:: CPU_FLOAT_LOAD | ( ~CPU_SIZE_LOAD[2,1] & MEM_RDATA[~|CPU_SIZE_LOAD ? 7 : CPU_SIZE_LOAD[0,1] ? 15 : 31, 1] );
 
     always {
         onehot( STATE ) {

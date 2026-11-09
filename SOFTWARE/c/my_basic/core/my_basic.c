@@ -938,11 +938,11 @@ static _object_t* _exp_assign = 0;
 	do { \
 		if(sizeof(__r) == sizeof(unsigned char)) { \
 			union { unsigned char i; real_t r; } __u; \
-			__u.i = __i; \
+			__u.i = (unsigned char)(__i); \
 			__r = __u.r; \
 		} else if(sizeof(__r) == sizeof(unsigned short)) { \
 			union { unsigned short i; real_t r; } __u; \
-			__u.i = __i; \
+			__u.i = (unsigned short)(__i); \
 			__r = __u.r; \
 		} else if(sizeof(__r) == sizeof(unsigned)) { \
 			union { unsigned i; real_t r; } __u; \

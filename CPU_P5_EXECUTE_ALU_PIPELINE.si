@@ -1,4 +1,4 @@
-    $$ is_adduw =       "EXECUTE_ALU_ALUOP[13,1]"
+$$ is_adduw =       "EXECUTE_ALU_ALUOP[13,1]"
     $$ is_alt =         "EXECUTE_ALU_ALUOP[12,1]"
     $$ is_bext =        "EXECUTE_ALU_ALUOP[11,1]"
     $$ is_bclr =        "EXECUTE_ALU_ALUOP[11,1]"
@@ -32,7 +32,7 @@
 
 unit cpu_execute_alu(
     $$for i=1,3 do
-    input   uint64              EXECUTE_ALU_I$i$,                                                                                           // INTEGER REGISTERS
+    input   uint64              EXECUTE_ALU_I$i$,
     $$end
 
     output  uint1               EXECUTE_ALU_READY,
@@ -49,10 +49,9 @@ unit cpu_execute_alu(
     output  uint64              COMMIT_ALU_RESULT,
     output  uint5               COMMIT_ALU_REGISTER,
 
-    output  uint32              EXECUTE_ALU_RD                                                                                  // INSTRUCTION IN EXECUTE IS WRITING TO { FLOAT, RD }
+    output  uint32              EXECUTE_ALU_RD
 ) <reginputs> {
     alu_execute EXECUTE( COMMIT_ACK <: COMMIT.ALU_ACK );
-    alu_add_execute EXECUTE_ADD( COMMIT_ACK <: COMMIT.ALU_ADD_ACK );
     alu_csx_execute EXECUTE_CSX( COMMIT_ACK <: COMMIT.ALU_CSX_ACK );
     alu_logic_execute EXECUTE_LOGIC( COMMIT_ACK <: COMMIT.ALU_LOGIC_ACK );
     alu_mul_execute EXECUTE_MUL( COMMIT_ACK <: COMMIT.ALU_MUL_ACK );
@@ -67,9 +66,6 @@ unit cpu_execute_alu(
 
         ALU_READY <: EXECUTE.COMMIT_RESULT_READY,
         ALU_RESULT <: EXECUTE.COMMIT_RESULT,
-
-        ALU_ADD_READY <: EXECUTE_ADD.COMMIT_RESULT_READY,
-        ALU_ADD_RESULT <: EXECUTE_ADD.COMMIT_RESULT,
 
         ALU_CSX_READY <: EXECUTE_CSX.COMMIT_RESULT_READY,
         ALU_CSX_RESULT <: EXECUTE_CSX.COMMIT_RESULT,
@@ -87,15 +83,14 @@ unit cpu_execute_alu(
         ALU_MNMX_RESULT <: EXECUTE_MNMX.COMMIT_RESULT
     );
 
-    uint1               IS_ADDSUB <:: ~|$ISN_F3$ | $is_shxadd$ ;
     uint1               IS_COUNTSIGNX <:: ( $ISN_F3$ == 3b001 ) & ~$ISN$[5,1] & $is_countsignx$;
     uint1               IS_LOGIC <:: ( ( $ISN_F3$ == 3b100 ) | ( $ISN_F3$ == 3b110 ) | ( $ISN_F3$ == 3b111 ) ) & ( $ISN$[5,1] ? ( $is_alt$ | ~|$ISN_F7$) : 1b1 );
     uint1               IS_SLT <:: ( ( $ISN_F3$ == 3b010 ) | ( $ISN_F3$ == 3b011 ) ) & ( $ISN$[5,1] ? ~|$ISN_F7$ : 1b1 ) & ~$ISN_CUSTOM$;
 
-    uint64              LOGIC_I2 <:: ( $ISN$[5,1] & EXECUTE_ALU_ALUOP[12,1] ) ? ~$REG_I2$ : $REG_I2$;                           // ~I2 FOR ORN ANDN XNOR
-    uint1               COND_SR2_N0 <:: |$REG_I2$;                                                                              // $REG_I2$ != 0?
+    uint64              LOGIC_I2 <:: ( $ISN$[5,1] & EXECUTE_ALU_ALUOP[12,1] ) ? ~$REG_I2$ : $REG_I2$;
+    uint1               COND_SR2_N0 <:: |$REG_I2$;
 
-    uint2               MUL_SIGN[4] = { 2b11, 2b11, 2b00, 2b01 };                                                               // SIGN EXTENSION FOR   { MUL MULW, MULH, MULHU, MULHSU }
+    uint2               MUL_SIGN[4] = { 2b11, 2b11, 2b00, 2b01 };
     int130              MUL <:: ( $ISN_CUSTOM$ ? ( $ISN$[27,1] ? {{49{$REG_I1$[15,1]}}, $REG_I1$[0,16]} :
                                                    $ISN$[26,1] ? {{33{$REG_I1$[31,1]}}, $REG_I1$[0,32]} : { $REG_I1$[63,1], $REG_I1$ } ) :
                                                  ( $IS_32$     ? { 33b0, $REG_I1$[0,32] } : { MUL_SIGN[$ISN_F3$][0,1] & $REG_I1$[63,1], $REG_I1$ } ) )
@@ -105,10 +100,10 @@ unit cpu_execute_alu(
                                                  ( $IS_32$      ? { 33b0, $REG_I2$[0,32] } : { MUL_SIGN[$ISN_F3$][1,1] & $REG_I2$[63,1], $REG_I2$ } ) );
     uint64              MAC_R <:: ( $ISN$[27,1] | $ISN$[26,1] ) ? ( { {32{MUL[31,1]}}, MUL[0,32] } ) : MUL[0,64];
 
-    EXECUTE.START := 0; EXECUTE_ADD.START := 0; EXECUTE_CSX.START := 0; EXECUTE_LOGIC.START := 0; EXECUTE_MUL.START := 0; EXECUTE_COND.START := 0; EXECUTE_MNMX.START := 0;
+    EXECUTE.START := 0; EXECUTE_CSX.START := 0; EXECUTE_LOGIC.START := 0; EXECUTE_MUL.START := 0; EXECUTE_COND.START := 0; EXECUTE_MNMX.START := 0;
 
     always {
-        uint8       STATE = uninitialised;
+        uint7       STATE = uninitialised;
         uint32      RD = uninitialised;
 
         uint6       CLZ = uninitialised;
@@ -116,31 +111,26 @@ unit cpu_execute_alu(
 
         onehot( STATE ) {
             case 0: {
-                RD = EXECUTE_ALU_ACK << $REG_RD$;                                                                               // SET / CLEAR THE REGISTER CONTENTION FLAG
-
-                if( EXECUTE_ALU_ACK ) {                                                                                         // WAIT FOR AGU TO ACKNOWLEDGE INSTRUCTION IS READY
+                RD = EXECUTE_ALU_ACK << $REG_RD$;
+                if( EXECUTE_ALU_ACK ) {
                     EXECUTE_ALU_READY = 0;
-
                     STATE = $is_mul$ ? 4 :
-                            $is_minmax$ ? 128 :
-                            ( $is_cond$ | IS_SLT ) ? 64 :
-                            IS_ADDSUB ? 8 :
-                            IS_LOGIC ? 16 :
-                            IS_COUNTSIGNX ? 32 :
+                            $is_minmax$ ? 64 :
+                            ( $is_cond$ | IS_SLT ) ? 32 :
+                            IS_LOGIC ? 8 :
+                            IS_COUNTSIGNX ? 16 :
                             2;
                 }
             }
             case 1: {
                 if( EXECUTE.READY ) {
                     COMMIT.ALU_DESTREG = $REG_RD$;
-
                     EXECUTE.INSTRUCTION = $ISN$;
                     EXECUTE.CUSTOM = $ISN_CUSTOM$;
                     EXECUTE.I1 = $REG_I1$;
                     EXECUTE.I2 = $REG_I2$;
                     EXECUTE.ALUOP = EXECUTE_ALU_ALUOP;
                     EXECUTE.SIGNX = $ISN_SIGNX$;
-
                     EXECUTE.START = 1; EXECUTE_ALU_READY = 1; STATE = 1;
                 }
             }
@@ -149,111 +139,83 @@ unit cpu_execute_alu(
                     EXECUTE_MUL.DESTREG = $REG_RD$;
                     COMMIT.ALU_MUL_DESTREG = $REG_RD$;
                     EXECUTE_MUL.SIGNX = $ISN_SIGNX$;
-
-                    EXECUTE_MUL.RESULT = $ISN_CUSTOM$ ? $ISN$[25,1] ? ( ( $ISN$[26,1] ? $REG_I3$[0,32] : $REG_I3$ ) - MAC_R ) : // TH.MUL[H|W][S|A]
+                    EXECUTE_MUL.RESULT = $ISN_CUSTOM$ ? $ISN$[25,1] ? ( ( $ISN$[26,1] ? $REG_I3$[0,32] : $REG_I3$ ) - MAC_R ) :
                                                                       ( ( $ISN$[26,1] ? $REG_I3$[0,32] : $REG_I3$ ) + MAC_R ) :
                                               $IS_32$ ? MUL[ 0, 32 ] : MUL[ { |$ISN_F3$[0,2], 6b0 }, 64 ];
-
                     EXECUTE_MUL.START = 1; EXECUTE_ALU_READY = 1; STATE = 1;
                 }
             }
             case 3: {
-                if( EXECUTE_ADD.READY ) {
-                    EXECUTE_ADD.DESTREG = $REG_RD$;
-                    COMMIT.ALU_ADD_DESTREG = $REG_RD$;
-
-                    EXECUTE_ADD.RESULT = EXECUTE_ALU_ALUOP[12,1] ? ( ( $IS_32$ ? $REG_I1$[0,32] : $REG_I1$ )                    // SUB[W]
-                                                                   -
-                                                                     ( $IS_32$ ? $REG_I2$[0,32] : $REG_I2$ ) )
-                                                                   :
-                                                                   ( ( ( $IS_32$ ? $REG_I1$[0,32] : $REG_I1$ ) << $ISN_F3$[1,2] )
-                                                                   +
-                                                                     ( $IS_32$ & ~EXECUTE_ALU_ALUOP[13,1] ? $REG_I2$[0,32] : $REG_I2$ ) );
-                    EXECUTE_ADD.SIGNX = $ISN_SIGNX$;
-
-                    EXECUTE_ADD.START = 1; EXECUTE_ALU_READY = 1; STATE = 1;
-                }
-            }
-            case 4: {
                 if( EXECUTE_LOGIC.READY ) {
                     EXECUTE_LOGIC.DESTREG = $REG_RD$;
                     COMMIT.ALU_LOGIC_DESTREG = $REG_RD$;
-
                     switch( $ISN_F3$[0,2] ) {
-                        case 2b00: { EXECUTE_LOGIC.RESULT = $REG_I1$ ^ LOGIC_I2; }                                           // X[N]OR
-                        case 2b10: { EXECUTE_LOGIC.RESULT = $REG_I1$ | LOGIC_I2; }                                           // OR[N]
-                        default:   { EXECUTE_LOGIC.RESULT = $REG_I1$ & LOGIC_I2; }                                           // AND[N]
+                        case 2b00: { EXECUTE_LOGIC.RESULT = $REG_I1$ ^ LOGIC_I2; }
+                        case 2b10: { EXECUTE_LOGIC.RESULT = $REG_I1$ | LOGIC_I2; }
+                        default:   { EXECUTE_LOGIC.RESULT = $REG_I1$ & LOGIC_I2; }
                     }
-
                     EXECUTE_LOGIC.START = 1; EXECUTE_ALU_READY = 1; STATE = 1;
                 }
             }
-            case 5: {
+            case 4: {
                 if( EXECUTE_CSX.READY ) {
                     EXECUTE_CSX.DESTREG = $REG_RD$;
                     COMMIT.ALU_CSX_DESTREG = $REG_RD$;
-
                     if( $ISN_CUSTOM$ ) {
-                        EXECUTE_CSX.RESULT = ( $ISN$[25,1] ? ~|$REG_I1$ : &$REG_I1$ ) ? 64 : ~CLZ;                           // TH.FF1 TH.FF0
+                        EXECUTE_CSX.RESULT = ( $ISN$[25,1] ? ~|$REG_I1$ : &$REG_I1$ ) ? 64 : ~CLZ;
                     } else {
-                        if( ~$REG_S2$[2,1] ) {                                                                                  // CLZ[W] CTZ[W] CPOP[W]
-                            if( ( ~$IS_32$ & |$REG_I1$ ) | ( $IS_32$ & |$REG_I1$[0,32] ) ) {                                    // CHECK FOR SPECIAL CASES
+                        if( ~$REG_S2$[2,1] ) {
+                            if( ( ~$IS_32$ & |$REG_I1$ ) | ( $IS_32$ & |$REG_I1$[0,32] ) ) {
                                 switch( $REG_S2$[0,2] ) {
                                     case 2b00: { EXECUTE_CSX.RESULT = CLZ; }
                                     case 2b01: { ( EXECUTE_CSX.RESULT ) =  ctz_silice_64( $IS_32$ ? { 32hffffffff, $REG_I1$[0,32] } : $REG_I1$ ); }
                                     default:   { ( EXECUTE_CSX.RESULT ) = cpop_silice_64( $IS_32$ ?                $REG_I1$[0,32] :   $REG_I1$ ); }
                                 }
                             } else {
-                                EXECUTE_CSX.RESULT = { ~$IS_32$ & ~$REG_S2$[1,1], $IS_32$ & ~$REG_S2$[1,1], 5b00000 };       // REPORT 32/64 FOR CTZ/CLZ AND 0 FOR CPOP IF SOURCEREG1 == 0
+                                EXECUTE_CSX.RESULT = { ~$IS_32$ & ~$REG_S2$[1,1], $IS_32$ & ~$REG_S2$[1,1], 5b00000 };
                             }
                         } else {
-                            EXECUTE_CSX.RESULT = $REG_S2$[0,1] ? { {48{$REG_I1$[15,1]}}, $REG_I1$[0,16] } :                  // SEXT.H
-                                                                    { {56{$REG_I1$[ 7,1]}}, $REG_I1$[0, 8] };                   // SEXT.B
+                            EXECUTE_CSX.RESULT = $REG_S2$[0,1] ? { {48{$REG_I1$[15,1]}}, $REG_I1$[0,16] } :
+                                                                    { {56{$REG_I1$[ 7,1]}}, $REG_I1$[0, 8] };
                         }
                     }
-
                     EXECUTE_CSX.START = 1; EXECUTE_ALU_READY = 1; STATE = 1;
                 }
             }
-            case 6: {
+            case 5: {
                 if( EXECUTE_COND.READY ) {
                     EXECUTE_COND.DESTREG = $REG_RD$;
                     COMMIT.ALU_COND_DESTREG = $REG_RD$;
-
                     if( $ISN_CUSTOM$ ) {
-                        EXECUTE_COND.RESULT = ( $ISN$[25,1] ? COND_SR2_N0 : ~COND_SR2_N0 ) ? $REG_I1$ : $REG_I3$;           // TH.MVEQZ TH.MVNEZ
+                        EXECUTE_COND.RESULT = ( $ISN$[25,1] ? COND_SR2_N0 : ~COND_SR2_N0 ) ? $REG_I1$ : $REG_I3$;
                     } else {
                         switch( $ISN_F3$ ) {
-                            case 3b010: {EXECUTE_COND.RESULT = $I1I2_LT$; }                                                     // SLT[I]
+                            case 3b010: {EXECUTE_COND.RESULT = $I1I2_LT$; }
                             case 3b011: {
-                               EXECUTE_COND.RESULT = $ISN$[5,1] ? ( ~|$REG_S1$ ) ? COND_SR2_N0 : $I1I2_LTU$ :                   // SLTU  ( RS1==x0 ? op2!=0 : op1<op2 )
-                                                                    ( $REG_I2$ == 1 ) ? ~|$REG_I1$ : $I1I2_LTU$;                  // SLTIU ( op2==1  ? RS1==0 : op1<op2 )
+                               EXECUTE_COND.RESULT = $ISN$[5,1] ? ( ~|$REG_S1$ ) ? COND_SR2_N0 : $I1I2_LTU$ :
+                                                                    ( $REG_I2$ == 1 ) ? ~|$REG_I1$ : $I1I2_LTU$;
                             }
-                            default: {EXECUTE_COND.RESULT = ( $ISN_F3$[1,1] ? COND_SR2_N0 : ~COND_SR2_N0 ) ? 0 : $REG_I1$; }                  // CZERO.EQZ CZERO.NEZ
+                            default: {EXECUTE_COND.RESULT = ( $ISN_F3$[1,1] ? COND_SR2_N0 : ~COND_SR2_N0 ) ? 0 : $REG_I1$; }
                         }
                     }
-
                     EXECUTE_COND.START = 1; EXECUTE_ALU_READY = 1; STATE = 1;
                 }
             }
-            case 7: {
+            case 6: {
                 if( EXECUTE_MNMX.READY ) {
                     EXECUTE_MNMX.DESTREG = $REG_RD$;
                     COMMIT.ALU_MNMX_DESTREG = $REG_RD$;
-
-                    EXECUTE_MNMX.RESULT = ( ( $ISN_F3$[0,1] ? $I1I2_LTU$ : $I1I2_LT$ ) ^ $ISN_F3$[1,1] ) ? $REG_I1$ :        // MIN[U] MAX[U]
-                                                                                                              $REG_I2$;
-
+                    EXECUTE_MNMX.RESULT = ( ( $ISN_F3$[0,1] ? $I1I2_LTU$ : $I1I2_LT$ ) ^ $ISN_F3$[1,1] ) ? $REG_I1$ : $REG_I2$;
                     EXECUTE_MNMX.START = 1; EXECUTE_ALU_READY = 1; STATE = 1;
                 }
             }
         }
 
-        EXECUTE_ALU_RD = RD | EXECUTE.RD | EXECUTE_ADD.RD | EXECUTE_CSX.RD | EXECUTE_LOGIC.RD | EXECUTE_MUL.RD | EXECUTE_COND.RD | EXECUTE_MNMX.RD | COMMIT.RD;
+        EXECUTE_ALU_RD = RD | EXECUTE.RD | EXECUTE_CSX.RD | EXECUTE_LOGIC.RD | EXECUTE_MUL.RD | EXECUTE_COND.RD | EXECUTE_MNMX.RD | COMMIT.RD;
 
         if( reset ) {
             RD = 0; EXECUTE_ALU_READY = 1; STATE = 1;
-            EXECUTE.START = 0; EXECUTE_ADD.START = 0; EXECUTE_CSX.START = 0; EXECUTE_LOGIC.START = 0; EXECUTE_MUL.START = 0; EXECUTE_COND.START = 0; EXECUTE_MNMX.START = 0;
+            EXECUTE.START = 0; EXECUTE_CSX.START = 0; EXECUTE_LOGIC.START = 0; EXECUTE_MUL.START = 0; EXECUTE_COND.START = 0; EXECUTE_MNMX.START = 0;
         }
     }
 }
@@ -275,6 +237,58 @@ unit cpu_execute_alu(
     $$ dorotate =       "ALUOP[ 2,1]"
     $$ doshxadd =       "ALUOP[ 1,1]"
     $$ dosra =          "ALUOP[ 0,1]"
+
+// Brand new dedicated ADD/SUB/SHxADD execution pipeline stage
+unit cpu_execute_add(
+    input   uint64              EXECUTE_ADD_I1,
+    input   uint64              EXECUTE_ADD_I2,
+
+    output  uint1               EXECUTE_ADD_READY,
+    input   uint1               EXECUTE_ADD_ACK,
+    input   uint32              EXECUTE_ADD_INSTRUCTION,
+    input   uint14              EXECUTE_ADD_ALUOP,
+    input   uint1               EXECUTE_ADD_SIGNX,
+
+    output  uint1               EXECUTE_ADD_RESULT_READY,
+    input   uint1               COMMIT_EXECUTE_ADD_RESULT_ACK,
+    output  uint64              COMMIT_ADD_RESULT,
+    output  uint5               COMMIT_ADD_REGISTER,
+    output  uint32              EXECUTE_ADD_RD
+) <reginputs> {
+    uint3   STATE = 1;
+    uint1   IS_32  <:: EXECUTE_ADD_INSTRUCTION[3,1];
+    uint3   ISN_F3 <:: Rtype( EXECUTE_ADD_INSTRUCTION ).f3;
+
+    uint64  RAW_RESULT <:: EXECUTE_ADD_ALUOP[12,1] ?
+                ( ( IS_32 ? EXECUTE_ADD_I1[0,32] : EXECUTE_ADD_I1 ) - ( IS_32 ? EXECUTE_ADD_I2[0,32] : EXECUTE_ADD_I2 ) ) :
+                ( ( ( IS_32 ? EXECUTE_ADD_I1[0,32] : EXECUTE_ADD_I1 ) << ISN_F3[1,2] ) + ( ( IS_32 & ~EXECUTE_ADD_ALUOP[13,1] ) ? EXECUTE_ADD_I2[0,32] : EXECUTE_ADD_I2 ) );
+
+    EXECUTE_ADD_RESULT_READY := STATE[2,1];
+
+    always {
+        onehot( STATE ) {
+            case 0: {
+                EXECUTE_ADD_RD = EXECUTE_ADD_ACK << Rtype( EXECUTE_ADD_INSTRUCTION ).rd;
+                if( EXECUTE_ADD_ACK ) {
+                    EXECUTE_ADD_READY = 0;
+                    COMMIT_ADD_REGISTER = Rtype( EXECUTE_ADD_INSTRUCTION ).rd;
+                    COMMIT_ADD_RESULT = { EXECUTE_ADD_SIGNX ? {32{RAW_RESULT[31,1]}} : RAW_RESULT[32,32], RAW_RESULT[0,32] };
+                    STATE = 2;
+                }
+            }
+            case 1: { STATE = 4; }
+            case 2: {
+                if( COMMIT_EXECUTE_ADD_RESULT_ACK ) {
+                    EXECUTE_ADD_RD = 0;
+                    EXECUTE_ADD_READY = 1;
+                    STATE = 1;
+                }
+            }
+        }
+
+        if( reset ) { EXECUTE_ADD_RD = 0; EXECUTE_ADD_READY = 1; STATE = 1; }
+    }
+}
 
 unit alu_execute(
     output  uint1               READY,
@@ -389,35 +403,6 @@ unit alu_execute(
         }
 
         if( reset ) { RD = 0; READY = 1; MASK = 0; STATE = 1; }
-    }
-}
-
-unit alu_add_execute(
-    output  uint1               READY,
-    input   uint1               START,
-    output  uint32              RD,
-
-    input   uint64              RESULT,
-    input   uint5               DESTREG,
-    input   uint1               SIGNX,
-
-    input   uint1               COMMIT_ACK,
-    output  uint1               COMMIT_RESULT_READY,
-    output  uint64              COMMIT_RESULT
-) <reginputs> {
-    uint3               STATE = 1;
-
-    COMMIT_RESULT := { SIGNX ? {32{RESULT[31, 1]}} : RESULT[32,32], RESULT[0, 32] };
-    COMMIT_RESULT_READY := STATE[2,1];
-
-    always {
-        onehot( STATE ) {
-            case 0: { RD = START << DESTREG; if( START ) { READY = 0; STATE = 2; } }
-            case 1: { STATE = 4; }
-            case 2: { if( COMMIT_ACK ) { RD = 0; READY = 1; STATE = 1; } }
-        }
-
-        if( reset ) { RD = 0; READY = 1; STATE = 1; }
     }
 }
 
@@ -571,11 +556,6 @@ unit alu_commit(
     input   uint64              ALU_RESULT,
     input   uint5               ALU_DESTREG,
 
-    input   uint1               ALU_ADD_READY,
-    output  uint1               ALU_ADD_ACK,
-    input   uint64              ALU_ADD_RESULT,
-    input   uint5               ALU_ADD_DESTREG,
-
     input   uint1               ALU_CSX_READY,
     output  uint1               ALU_CSX_ACK,
     input   uint64              ALU_CSX_RESULT,
@@ -606,17 +586,15 @@ unit alu_commit(
     output  uint5               COMMIT_ALU_REGISTER
 ) <reginputs> {
     ALU_ACK := 0;
-    ALU_ADD_ACK := 0;
     ALU_CSX_ACK := 0;
     ALU_LOGIC_ACK := 0;
     ALU_MUL_ACK := 0;
     ALU_COND_ACK := 0;
     ALU_MNMX_ACK := 0;
 
-    RESULT_READY := ALU_READY | ALU_ADD_READY | ALU_CSX_READY | ALU_LOGIC_READY | ALU_MUL_READY | ALU_COND_READY | ALU_MNMX_READY;
+    RESULT_READY := ALU_READY | ALU_CSX_READY | ALU_LOGIC_READY | ALU_MUL_READY | ALU_COND_READY | ALU_MNMX_READY;
     RD := RESULT_READY << (
                         ALU_READY ? ALU_DESTREG :
-                    ALU_ADD_READY ? ALU_ADD_DESTREG :
                     ALU_CSX_READY ? ALU_CSX_DESTREG :
                     ALU_LOGIC_READY ? ALU_LOGIC_DESTREG :
                     ALU_MUL_READY ? ALU_MUL_DESTREG :
@@ -626,7 +604,6 @@ unit alu_commit(
                 );
 
     COMMIT_ALU_RESULT := ALU_READY ? ALU_RESULT :
-                         ALU_ADD_READY ? ALU_ADD_RESULT :
                          ALU_CSX_READY ? ALU_CSX_RESULT :
                          ALU_LOGIC_READY ? ALU_LOGIC_RESULT :
                          ALU_MUL_READY ? ALU_MUL_RESULT :
@@ -634,7 +611,6 @@ unit alu_commit(
                          ALU_MNMX_READY ? ALU_MNMX_RESULT :
                          0;
     COMMIT_ALU_REGISTER := ALU_READY ? ALU_DESTREG :
-                         ALU_ADD_READY ? ALU_ADD_DESTREG :
                          ALU_CSX_READY ? ALU_CSX_DESTREG :
                          ALU_LOGIC_READY ? ALU_LOGIC_DESTREG :
                          ALU_MUL_READY ? ALU_MUL_DESTREG :
@@ -646,23 +622,19 @@ unit alu_commit(
         if( ALU_READY ) {
             ALU_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
         } else {
-            if( ALU_ADD_READY ) {
-                ALU_ADD_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
+            if( ALU_CSX_READY ) {
+                ALU_CSX_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
             } else {
-                if( ALU_CSX_READY ) {
-                    ALU_CSX_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
+                if( ALU_LOGIC_READY ) {
+                    ALU_LOGIC_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
                 } else {
-                    if( ALU_LOGIC_READY ) {
-                        ALU_LOGIC_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
+                    if( ALU_MUL_READY ) {
+                        ALU_MUL_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
                     } else {
-                        if( ALU_MUL_READY ) {
-                            ALU_MUL_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
+                        if( ALU_COND_READY ) {
+                            ALU_COND_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
                         } else {
-                            if( ALU_COND_READY ) {
-                                ALU_COND_ACK = COMMIT_EXECUTE_ALU_RESULT_ACK;
-                            } else {
-                                ALU_MNMX_ACK = ALU_MNMX_READY & COMMIT_EXECUTE_ALU_RESULT_ACK;
-                            }
+                            ALU_MNMX_ACK = ALU_MNMX_READY & COMMIT_EXECUTE_ALU_RESULT_ACK;
                         }
                     }
                 }

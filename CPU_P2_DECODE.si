@@ -287,8 +287,9 @@ unit cpu_instruction_registers(
     decode_lookup_thead.addr := Rtype( INSTRUCTION ).f7[2,5];
     decode_lookup_thead_ls.addr := { INSTRUCTION[12,1], INSTRUCTION[27,5] };
 
+    SR_F := decode_lookup.rdata[3,3]; SR := decode_lookup.rdata[0,3];                                                           // SET SR_F and SR_NUM FROM LOOKUP TABLE
+
     always {
-        SR_F = decode_lookup.rdata[3,3]; SR = decode_lookup.rdata[0,3];                                                     // SET SR_F and SR_NUM FROM LOOKUP TABLE
 
         switch( INSTRUCTION[2,5] ) {                                                                                            // OVERRIDE LOOKUP TABLES FOR SPECIFIC INSTRUCTIONS
             default: {}                                                                                                         //  USE SR_F AND SR_NUM FROM LOOKUP TABLE UNLESS OVERRIDDEN
@@ -418,8 +419,9 @@ unit cpu_instruction_flags(
     flags_lookup.addr := Rtype( INSTRUCTION ).opp[2,5];
     flags_lookup_fpu.addr := Rtype( INSTRUCTION ).f7[2,5];
 
+    FLAGS := flags_lookup.rdata;                                                                                                // SET FLAGS FROM LOOKUP TABLE
+
     always {
-        FLAGS = flags_lookup.rdata;                                                                                             // SET FLAGS FROM LOOKUP TABLE
 
         switch( INSTRUCTION[2,5] ) {
             default: {}                                                                                                         // USE FLAGSFROM LOOKUP TABLE UNLESS OVERRIDDEN

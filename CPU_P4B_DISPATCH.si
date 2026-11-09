@@ -26,7 +26,8 @@ unit cpu_dispatch(
     $$end
     input   uint64              DISPATCH_I3,                                                                                   // INTEGER REGISTERS    PIPELINE INPUT
     $$for i=1,3 do
-    simple_dualport_bram_port0 F$i$,                                                                                            // FLOAT REGISTERS READ PORT
+    simple_dualport_bram_port0 F$i$_E,                                                                                            // FLOAT REGISTERS READ PORT
+    simple_dualport_bram_port0 F$i$_O,                                                                                            // FLOAT REGISTERS READ PORT
     output  uint64              EXECUTE_CSRFPU_F$i$,
     $$end
 
@@ -88,9 +89,6 @@ unit cpu_dispatch(
 
         DISPATCH_INSTRUCTION <: DISPATCH_INSTRUCTION,
         DISPATCH_FLAGS <: DISPATCH_FLAGS,
-        $$for i=1,3 do
-        DISPATCH_F$i$ <: F$i$.rdata0,                                                                                  // FLOAT REGISTERS      PIPELINE INPUT
-        $$end
         DISPATCH_I1 <: DISPATCH_I1,
         DISPATCH_I1_ABS_32 <: ABS_I1.ABS_32,
         DISPATCH_I1_ABS_64 <: ABS_I1.ABS_64,
@@ -112,7 +110,6 @@ unit cpu_dispatch(
         DISPATCH_INSTRUCTION <: DISPATCH_INSTRUCTION,
         DISPATCH_FLAGS <: DISPATCH_FLAGS,
         DISPATCH_IMM_LA_SA <: DISPATCH_IMM_LA_SA,
-        DISPATCH_F2 <: F2.rdata0,
 
         EXECUTE_LSA_INSTRUCTION :> EXECUTE_LSA_INSTRUCTION,
         EXECUTE_LSA_FLAGS :> EXECUTE_LSA_FLAGS,
@@ -122,10 +119,22 @@ unit cpu_dispatch(
     );
     LSA.DISPATCH_I2 := ( $DISP_IS_CUSTOM$ & $DISP_IS_STORE$ ) ? DISPATCH_I3 : DISPATCH_I2;
 
-    F1.addr0 := R4type( DISPATCH_INSTRUCTION ).sr1;
-    F2.addr0 := ( $DISP_IS_CUSTOM$ & $DISP_IS_STORE$ ) ? R4type( DISPATCH_INSTRUCTION ).rd :                                    // FOR XTHEADFMEMIDX
-                                                         R4type( DISPATCH_INSTRUCTION ).sr2;
-    F3.addr0 := R4type( DISPATCH_INSTRUCTION ).sr3;
+    F1_E.addr0 := R4type( DISPATCH_INSTRUCTION ).sr1[1,4];
+    F1_O.addr0 := R4type( DISPATCH_INSTRUCTION ).sr1[1,4];
+    F2_E.addr0 := ( $DISP_IS_CUSTOM$ & $DISP_IS_STORE$ ) ? R4type( DISPATCH_INSTRUCTION ).rd[1,4] :                                    // FOR XTHEADFMEMIDX
+    R4type( DISPATCH_INSTRUCTION ).sr2[1,4];
+    F2_O.addr0 := ( $DISP_IS_CUSTOM$ & $DISP_IS_STORE$ ) ? R4type( DISPATCH_INSTRUCTION ).rd[1,4] :                                    // FOR XTHEADFMEMIDX
+    R4type( DISPATCH_INSTRUCTION ).sr2[1,4];
+    F3_E.addr0 := R4type( DISPATCH_INSTRUCTION ).sr3[1,4];
+    F3_O.addr0 := R4type( DISPATCH_INSTRUCTION ).sr3[1,4];
+
+    CSRFPU.DISPATCH_F1 := R4type( DISPATCH_INSTRUCTION ).sr1[0,1] ? F1_O.rdata0 : F1_E.rdata0;
+    CSRFPU.DISPATCH_F2 := ( ( $DISP_IS_CUSTOM$ & $DISP_IS_STORE$ ) ? R4type( DISPATCH_INSTRUCTION ).rd[0,1] :
+    R4type( DISPATCH_INSTRUCTION ).sr2[0,1] ) ? F2_O.rdata0 : F2_E.rdata0;
+    CSRFPU.DISPATCH_F3 := R4type( DISPATCH_INSTRUCTION ).sr3[0,1] ? F3_O.rdata0 : F3_E.rdata0;
+    LSA.DISPATCH_F2 := ( ( $DISP_IS_CUSTOM$ & $DISP_IS_STORE$ ) ? R4type( DISPATCH_INSTRUCTION ).rd[0,1] :
+    R4type( DISPATCH_INSTRUCTION ).sr2[0,1] ) ? F2_O.rdata0 : F2_E.rdata0;
+
 
     EXECUTE_ALUDIVIDE_ACK := 0; EXECUTE_CSRFPU_ACK := 0; EXECUTE_LSA_ACK := 0;
 

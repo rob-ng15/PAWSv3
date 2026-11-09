@@ -319,24 +319,24 @@ void Turbulent8 (espan_t *pspan)
 }
 
 
-#if	!id386 && !defined(__MRISC32_HARD_FLOAT__)
+#if !id386 && !defined(__MRISC32_HARD_FLOAT__)
 
 /*
-=============
-D_DrawSpans8
-Note: This function is the top CPU consumer. Optimize it as far as possible!
-=============
-*/
+ = =====*=======
+ D_DrawSpans8
+ =============
+ */
 void D_DrawSpans8 (espan_t *pspan)
 {
-	int				count, spancount;
+	int				count, spancount, current_spancount;
 	unsigned char	*pbase, *pdest;
 	fixed16_t		s, t, snext, tnext, sstep, tstep;
 	float			sdivz, tdivz, zi, z, du, dv, spancountminus1;
 	float			sdivz8stepu, tdivz8stepu, zi8stepu;
-	sstep = 0;	// keep compiler happy
-	tstep = 0;	// ditto
+	float			const_65536 = 65536.0f;
 
+	sstep = 0;
+	tstep = 0;
 	pbase = (unsigned char *)cacheblock;
 
 	byte *viewbuffer = (byte *)d_viewbuffer;
@@ -356,116 +356,153 @@ void D_DrawSpans8 (espan_t *pspan)
 	fixed16_t _bbextentt = bbextentt;
 	int _cachewidth = cachewidth;
 
-	sdivz8stepu = _d_sdivzstepu * 8;
-	tdivz8stepu = _d_tdivzstepu * 8;
-	zi8stepu = _d_zistepu * 8;
+	sdivz8stepu = _d_sdivzstepu * 8.0f;
+	tdivz8stepu = _d_tdivzstepu * 8.0f;
+	zi8stepu = _d_zistepu * 8.0f;
 
 	do
 	{
 		pdest = (unsigned char *)&viewbuffer[(_screenwidth * pspan->v) + pspan->u];
-
 		count = pspan->count;
 
-	// calculate the initial s/z, t/z, 1/z, s, and t and clamp
 		du = (float)pspan->u;
 		dv = (float)pspan->v;
 
 		sdivz = _d_sdivzorigin + dv*_d_sdivzstepv + du*_d_sdivzstepu;
 		tdivz = _d_tdivzorigin + dv*_d_tdivzstepv + du*_d_tdivzstepu;
 		zi = _d_ziorigin + dv*_d_zistepv + du*_d_zistepu;
-		z = (float)0x10000 / zi;	// prescale to 16.16 fixed-point
+
+		// Calculate initial 1/z
+		asm volatile ("fdiv.s %0, %1, %2" : "=f" (z) : "f" (const_65536), "f" (zi));
 
 		s = (int)(sdivz * z) + _sadjust;
-		if (s > _bbextents)
-			s = _bbextents;
-		else if (s < 0)
-			s = 0;
+		if (s > _bbextents) s = _bbextents;
+		else if (s < 0) s = 0;
 
 		t = (int)(tdivz * z) + _tadjust;
-		if (t > _bbextentt)
-			t = _bbextentt;
-		else if (t < 0)
-			t = 0;
+		if (t > _bbextentt) t = _bbextentt;
+		else if (t < 0) t = 0;
 
+		if (count >= 8) spancount = 8;
+		else spancount = count;
+		count -= spancount;
+
+		// PRIME THE PUMP: Calculate step deltas for the first span
+		if (count)
+		{
+			sdivz += sdivz8stepu;
+			tdivz += tdivz8stepu;
+			zi += zi8stepu;
+			asm volatile ("fdiv.s %0, %1, %2" : "=f" (z) : "f" (const_65536), "f" (zi));
+
+			snext = (int)(sdivz * z) + _sadjust;
+			if (snext > _bbextents) snext = _bbextents;
+			else if (snext < 8) snext = 8;
+
+			tnext = (int)(tdivz * z) + _tadjust;
+			if (tnext > _bbextentt) tnext = _bbextentt;
+			else if (tnext < 8) tnext = 8;
+
+			sstep = (snext - s) >> 3;
+			tstep = (tnext - t) >> 3;
+		}
+		else
+		{
+			spancountminus1 = (float)(spancount - 1);
+			sdivz += _d_sdivzstepu * spancountminus1;
+			tdivz += _d_tdivzstepu * spancountminus1;
+			zi += _d_zistepu * spancountminus1;
+			asm volatile ("fdiv.s %0, %1, %2" : "=f" (z) : "f" (const_65536), "f" (zi));
+
+			snext = (int)(sdivz * z) + _sadjust;
+			if (snext > _bbextents) snext = _bbextents;
+			else if (snext < 8) snext = 8;
+
+			tnext = (int)(tdivz * z) + _tadjust;
+			if (tnext > _bbextentt) tnext = _bbextentt;
+			else if (tnext < 8) tnext = 8;
+
+			if (spancount > 1)
+			{
+				sstep = (snext - s) / (spancount - 1);
+				tstep = (tnext - t) / (spancount - 1);
+			}
+		}
+
+		// PIPELINE LOOP: Draw span N while calculating FDIV for span N+1
 		do
 		{
-		// calculate s and t at the far end of the span
-			if (count >= 8)
-				spancount = 8;
-			else
-				spancount = count;
+			current_spancount = spancount;
 
+			if (count >= 8) spancount = 8;
+			else spancount = count;
 			count -= spancount;
 
 			if (count)
 			{
-			// calculate s/z, t/z, zi->fixed s and t at far end of span,
-			// calculate s and t steps across span by shifting
 				sdivz += sdivz8stepu;
 				tdivz += tdivz8stepu;
 				zi += zi8stepu;
-				z = (float)0x10000 / zi;	// prescale to 16.16 fixed-point
-
-				snext = (int)(sdivz * z) + _sadjust;
-				if (snext > _bbextents)
-					snext = _bbextents;
-				else if (snext < 8)
-					snext = 8;	// prevent round-off error on <0 steps from
-								//  from causing overstepping & running off the
-								//  edge of the texture
-
-				tnext = (int)(tdivz * z) + _tadjust;
-				if (tnext > _bbextentt)
-					tnext = _bbextentt;
-				else if (tnext < 8)
-					tnext = 8;	// guard against round-off error on <0 steps
-
-				sstep = (snext - s) >> 3;
-				tstep = (tnext - t) >> 3;
+				// ISSUE BACKGROUND FDIV FOR NEXT SPAN
+				asm volatile ("fdiv.s %0, %1, %2" : "=f" (z) : "f" (const_65536), "f" (zi));
 			}
-			else
+			else if (spancount > 0)
 			{
-			// calculate s/z, t/z, zi->fixed s and t at last pixel in span (so
-			// can't step off polygon), clamp, calculate s and t steps across
-			// span by division, biasing steps low so we don't run off the
-			// texture
 				spancountminus1 = (float)(spancount - 1);
 				sdivz += _d_sdivzstepu * spancountminus1;
 				tdivz += _d_tdivzstepu * spancountminus1;
 				zi += _d_zistepu * spancountminus1;
-				z = (float)0x10000 / zi;	// prescale to 16.16 fixed-point
+				// ISSUE BACKGROUND FDIV FOR FINAL SPAN
+				asm volatile ("fdiv.s %0, %1, %2" : "=f" (z) : "f" (const_65536), "f" (zi));
+			}
+
+			// DRAW CURRENT SPAN
+			asm volatile (
+				"1:\n\t"
+				"srai   t0, %1, 16\n\t"
+				"srai   t1, %2, 16\n\t"
+				"mulw   t1, t1, %4\n\t"
+				"addw   t0, t0, t1\n\t"
+				"add    t0, %5, t0\n\t"
+				"lbu    t2, 0(t0)\n\t"
+				"sb     t2, 0(%0)\n\t"
+				"addi   %0, %0, 1\n\t"
+				"addw   %1, %1, %6\n\t"
+				"addw   %2, %2, %7\n\t"
+				"addi   %3, %3, -1\n\t"
+				"bgtz   %3, 1b\n\t"
+				: "+r" (pdest), "+r" (s), "+r" (t), "+r" (current_spancount)
+				: "r" (_cachewidth), "r" (pbase), "r" (sstep), "r" (tstep)
+				: "t0", "t1", "t2", "memory"
+			);
+
+			s = snext;
+			t = tnext;
+
+			// CONSUME BACKGROUND FDIV
+			if (spancount > 0)
+			{
 				snext = (int)(sdivz * z) + _sadjust;
-				if (snext > _bbextents)
-					snext = _bbextents;
-				else if (snext < 8)
-					snext = 8;	// prevent round-off error on <0 steps from
-								//  from causing overstepping & running off the
-								//  edge of the texture
+				if (snext > _bbextents) snext = _bbextents;
+				else if (snext < 8) snext = 8;
 
 				tnext = (int)(tdivz * z) + _tadjust;
-				if (tnext > _bbextentt)
-					tnext = _bbextentt;
-				else if (tnext < 8)
-					tnext = 8;	// guard against round-off error on <0 steps
+				if (tnext > _bbextentt) tnext = _bbextentt;
+				else if (tnext < 8) tnext = 8;
 
-				if (spancount > 1)
+				if (count)
+				{
+					sstep = (snext - s) >> 3;
+					tstep = (tnext - t) >> 3;
+				}
+				else if (spancount > 1)
 				{
 					sstep = (snext - s) / (spancount - 1);
 					tstep = (tnext - t) / (spancount - 1);
 				}
 			}
 
-			do
-			{
-				*pdest++ = pbase[(s >> 16) + (t >> 16) * _cachewidth];
-				s += sstep;
-				t += tstep;
-			} while (--spancount > 0);
-
-			s = snext;
-			t = tnext;
-
-		} while (count > 0);
+		} while (spancount > 0);
 
 	} while ((pspan = pspan->pnext) != NULL);
 }

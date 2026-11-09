@@ -40,7 +40,7 @@ unit csrf(
     }
 }
 unit csr_timer(
-    output  uint$CWIDTH$  counter(0)
+    output  uint$CWIDTH$    counter(0)
 ) <reginputs> {
     counter := counter + 1;
 }
@@ -63,7 +63,7 @@ unit CSRblock(
     input   uint3               function3,
     input   uint5               rs1,
     input   uint64              sourceReg1,
-    input   uint1               INC_INSNRET,
+    input   uint3               INC_INSNRET,
     input   uint1               W_FPUFLAGS,
     input   uint5               IN_FPUFLAGS,
     output  uint8               OUT_FPUFLAGS,

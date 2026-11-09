@@ -11,7 +11,9 @@ unit cpu_execute_fastbase(
     output  uint64              COMMIT_FASTBASE_RESULT,
     output  uint5               COMMIT_FASTBASE_REGISTER,
 
-    output  uint32              EXECUTE_FASTBASE_RD                                                                             // REGISTER IS WRITING TO { FLOAT, RD }
+    output  uint32              EXECUTE_FASTBASE_RD,                                                                             // REGISTER IS WRITING TO { FLOAT, RD }
+
+    output  uint1               JAL_X0
 ) <reginputs> {
     fastbase_execute EXECUTE( COMMIT_ACK <: COMMIT.ACK );
     fastbase_execute_j EXECUTE_J( COMMIT_ACK <: COMMIT.ACK_J );
@@ -26,7 +28,7 @@ unit cpu_execute_fastbase(
         READY_J <: EXECUTE_J.COMMIT_RESULT_READY
     );
 
-    EXECUTE.START := 0; EXECUTE_J.START := 0;
+    EXECUTE.START := 0; EXECUTE_J.START := 0; JAL_X0 := 0;
 
     always {
         uint3       STATE = uninitialised;
@@ -52,12 +54,16 @@ unit cpu_execute_fastbase(
                 }
             }
             case 2: {
-                if( EXECUTE_J.READY ) {
-                    EXECUTE_J.DESTREG = EXECUTE_FASTBASE_DESTREG;
-                    COMMIT.DESTREG_J = EXECUTE_FASTBASE_DESTREG;
-                    COMMIT.RESULT_J = EXECUTE_FASTBASE_RESULT;
+                if( |EXECUTE_FASTBASE_DESTREG ) {
+                    if( EXECUTE_J.READY ) {
+                        EXECUTE_J.DESTREG = EXECUTE_FASTBASE_DESTREG;
+                        COMMIT.DESTREG_J = EXECUTE_FASTBASE_DESTREG;
+                        COMMIT.RESULT_J = EXECUTE_FASTBASE_RESULT;
 
-                    EXECUTE_J.START = 1; EXECUTE_FASTBASE_READY = 1; STATE = 1;
+                        EXECUTE_J.START = 1; EXECUTE_FASTBASE_READY = 1; STATE = 1;
+                    }
+                } else {
+                    JAL_X0 = 1; EXECUTE_FASTBASE_READY = 1; STATE = 1;
                 }
             }
         }

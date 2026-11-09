@@ -26,6 +26,7 @@ unit cpu_agu(
     input   uint64              AGU_I$i$,
     input   uint64              AGU_F$i$,
     output  uint64              EXECUTE_ALU_I$i$,
+    output  uint64              EXECUTE_ADD_I$i$,
     output  uint64              DISPATCH_I$i$,
     output  uint64              DISPATCH_F$i$,
     $$end
@@ -56,6 +57,12 @@ unit cpu_agu(
     output  uint1               EXECUTE_ALU_CUSTOM,
     output  uint2               EXECUTE_ALU_COMPARE,
 
+    input   uint1               EXECUTE_ADD_READY,
+    output  uint1               EXECUTE_ADD_ACK,
+    output  uint32              EXECUTE_ADD_INSTRUCTION,
+    output  uint14              EXECUTE_ADD_ALUOP,
+    output  uint1               EXECUTE_ADD_SIGNX,
+
     input   uint1               DISPATCH_READY,
     output  uint1               DISPATCH_ACK,
     output  uint32              DISPATCH_INSTRUCTION,
@@ -74,21 +81,27 @@ unit cpu_agu(
 
     output  uint64              AGU_RD                                                                                          // INSTRUCTION IN AGU IS WRITING TO { FLOAT, RD }
 ) <reginputs> {
-    uint64              IMM_LA_SA <:: (                                                                                         // LOAD STORE JALR IMMEDIATE ADDRESS CALCULATION
-                                        $AG_IS_ATOMIC$ ? 0 :
-                                        $AG_IS_CUSTOM$ ? AGU_I1 :
-                                        $AG_IS_STORE$ ? { {52{AGU_INSTRUCTION[31,1]}}, Stype( AGU_INSTRUCTION ).imm_b_11_5, Stype( AGU_INSTRUCTION ).imm_b_4_0 } :
-                                                        { {52{AGU_INSTRUCTION[31,1]}}, Itype(AGU_INSTRUCTION).imm }
-                                      )
-                                      +
-                                      (
-                                        $AG_IS_CUSTOM$ ? ( ( AGU_INSTRUCTION[28,1] ? AGU_I2[0,32] : AGU_I2 ) << AGU_INSTRUCTION[25,2] ) :
-                                        ( $AG_IS_LOAD$ | $AG_IS_STORE$ | $AG_IS_JUMP$ ) ? AGU_I1 : 0
+    // Extract the shift amount:
+    // For integer indexed loads (f3 == 100/101), shift is in bits[26:25]
+    // For float indexed loads (f3 == 110/111), shift is inferred from bits[26:25]:
+    //   00 = word (shift 2), 01 = double (shift 3)
+    uint2 custom_shift <:: AGU_INSTRUCTION[25,2];
+    uint64 IMM_LA_SA <:: (
+                            $AG_IS_ATOMIC$ ? 0 :
+                            $AG_IS_CUSTOM$ ? AGU_I1 :
+                            $AG_IS_STORE$ ? { {52{AGU_INSTRUCTION[31,1]}}, Stype( AGU_INSTRUCTION ).imm_b_11_5, Stype( AGU_INSTRUCTION ).imm_b_4_0 } :
+                            { {52{AGU_INSTRUCTION[31,1]}}, Itype(AGU_INSTRUCTION).imm }
+                         )
+                            +
+                         (
+                            $AG_IS_CUSTOM$ ? ( ( AGU_INSTRUCTION[28,1] ? AGU_I2[0,32] : AGU_I2 ) << custom_shift ) :
+                            ( $AG_IS_LOAD$ | $AG_IS_STORE$ | $AG_IS_JUMP$ ) ? AGU_I1 : 0
+                         );
 
-                                      );
     uint1               TAKE_BRANCH <:: ( Rtype(AGU_INSTRUCTION).f3[0,1] ^ I1I2_COMPARE.FLAGS[ Rtype(AGU_INSTRUCTION).f3[1,2], 1 ] );   // BRANCH TAKEN?
+    uint1               IS_ADD <:: $AG_IS_ALU$ & ( ~|Rtype(AGU_INSTRUCTION).f3 | AGU_ALUOP[1,1] ) & ~AGU_ALUOP[5,1];              // ADD/SUB/SHxADD
 
-    uint7               STATE = 1;
+    uint8               STATE = 1;
 
     i_compare I1I2_COMPARE <@clock_decode> (                                                                                    // INTEGER REGISTER COMPARISON FLAGS FOR BRANCH
         I_1 <: AGU_I1,
@@ -128,6 +141,23 @@ unit cpu_agu(
         EXECUTE_ALU_COMPARE :> EXECUTE_ALU_COMPARE
     );
 
+    alu_add_latch ALU_ADD(
+        clock_decode <: clock_decode,
+        LATCH <: EXECUTE_ADD_READY,
+
+        AGU_INSTRUCTION <: AGU_INSTRUCTION,
+        AG_IS_ALU_SIGNX <: $AG_IS_ALU_SIGNX$,
+        AGU_I1 <: AGU_I1,
+        AGU_I2 <: AGU_I2,
+        AGU_ALUOP <: AGU_ALUOP,
+
+        EXECUTE_ADD_I1 :> EXECUTE_ADD_I1,
+        EXECUTE_ADD_I2 :> EXECUTE_ADD_I2,
+        EXECUTE_ADD_INSTRUCTION :> EXECUTE_ADD_INSTRUCTION,
+        EXECUTE_ADD_ALUOP :> EXECUTE_ADD_ALUOP,
+        EXECUTE_ADD_SIGNX :> EXECUTE_ADD_SIGNX
+    );
+
     dispatch_latch DISPATCH(
         LATCH <: DISPATCH_READY,
 
@@ -157,7 +187,7 @@ unit cpu_agu(
         EXECUTE_FASTBASE_RESULT :> EXECUTE_FASTBASE_RESULT
     );
 
-    EXECUTE_ALU_ACK := 0; DISPATCH_ACK := 0; EXECUTE_FASTBASE_ACK := 0;
+    EXECUTE_ALU_ACK := 0; EXECUTE_ADD_ACK := 0; DISPATCH_ACK := 0; EXECUTE_FASTBASE_ACK := 0;
 
     BP_FLUSH := 0; BP_TAKEN := 0;                                                                                               // BRANCH PREDICTION FLUSH / TAKEN FLAGS
     BP_W.INVALIDATE := reset | CPU_FENCE;                                                                                       // INVALIDATE( after load ) CPU BRANCH PREDICTION TABLE
@@ -183,15 +213,19 @@ unit cpu_agu(
                             if( $AG_IS_LOAD$ | $AG_IS_STORE$ | $AG_IS_ATOMIC$ | $AG_IS_CSR$ | $AG_IS_FPU$ | ( $AG_IS_ALU$ & ~$AG_IS_ALU_FAST$ ) ) {
                                 if( DISPATCH_READY ) { DISPATCH_ACK = 1; AGU_READY = 1; } else { STATE = 16; }
                             } else {
-                                if( $AG_IS_ALU$ ) {
-                                    if( EXECUTE_ALU_READY ) {  EXECUTE_ALU_ACK = 1; AGU_READY = 1; } else { STATE = 32; }
+                                if( IS_ADD ) {
+                                    if( EXECUTE_ADD_READY ) { EXECUTE_ADD_ACK = 1; AGU_READY = 1; } else { STATE = 128; }
                                 } else {
-                                    if( $AG_IS_FENCE$ ) {
-                                        FENCE = { |Rtype( AGU_INSTRUCTION ).f7[1,2], ~Rtype( AGU_INSTRUCTION ).f3[0,1] };
-                                        AGU_READY = 1;
+                                    if( $AG_IS_ALU$ ) {
+                                        if( EXECUTE_ALU_READY ) {  EXECUTE_ALU_ACK = 1; AGU_READY = 1; } else { STATE = 32; }
                                     } else {
-                                        if( EXECUTE_FASTBASE_READY ) { EXECUTE_FASTBASE_ACK = 1; AGU_READY = 1; } else { STATE = 64; }
-                                        AGU_DO_BRANCH_JUMP = $AG_IS_JUMP$;                                                      //  JALR, SIGNAL FETCH UNIT TO RESTART AT THE NEW PC
+                                        if( $AG_IS_FENCE$ ) {
+                                            FENCE = { |Rtype( AGU_INSTRUCTION ).f7[1,2], ~Rtype( AGU_INSTRUCTION ).f3[0,1] };
+                                            AGU_READY = 1;
+                                        } else {
+                                            if( EXECUTE_FASTBASE_READY ) { EXECUTE_FASTBASE_ACK = 1; AGU_READY = 1; } else { STATE = 64; }
+                                            AGU_DO_BRANCH_JUMP = $AG_IS_JUMP$;                                                      //  JALR, SIGNAL FETCH UNIT TO RESTART AT THE NEW PC
+                                        }
                                     }
                                 }
                             }
@@ -214,8 +248,8 @@ unit cpu_agu(
 
             case 4: { if( DISPATCH_READY ) { DISPATCH_ACK = 1; AGU_READY = 1; STATE = 1; } }                                    // SEND INSTRUCTION TO DISPATCH
             case 5: { if( EXECUTE_ALU_READY ) { EXECUTE_ALU_ACK = 1; AGU_READY = 1; STATE = 1; } }                              // SEND INSTRUCTION TO ALU ( not DIVIDE )
-            case 6: { if( EXECUTE_FASTBASE_READY ) { EXECUTE_FASTBASE_ACK = 1; AGU_READY = 1; STATE = 1; } }                    // SEND INSTRUCTION TO FASTBASE
-
+            case 6: { if( EXECUTE_FASTBASE_READY ) { EXECUTE_FASTBASE_ACK = 1; AGU_READY = 1; STATE = 1; } }
+            case 7: { if( EXECUTE_ADD_READY ) { EXECUTE_ADD_ACK = 1; AGU_READY = 1; STATE = 1; } }
         }
 
         if( reset ) { AGU_RD = 0; AGU_READY = 1; STATE = 1; FENCE = 0; }
@@ -311,6 +345,33 @@ unit alu_latch(
             EXECUTE_ALU_I2 = ( AGU_INSTRUCTION[5,1] | AG_IS_ALU_CUSTOM ) ? AGU_I2 : { {52{AGU_INSTRUCTION[31,1]}}, Itype(AGU_INSTRUCTION).imm };
             EXECUTE_ALU_I3 = AGU_I3;
             EXECUTE_ALU_COMPARE = { AGU_COMPARE[3,1], AGU_COMPARE[2,1] };
+        }
+    }
+}
+
+unit alu_add_latch(
+    input   uint1               clock_decode,
+    input   uint1               LATCH,
+
+    input   uint32              AGU_INSTRUCTION,
+    input   uint1               AG_IS_ALU_SIGNX,
+    input   uint64              AGU_I1,
+    input   uint64              AGU_I2,
+    input   uint14              AGU_ALUOP,
+
+    output  uint64              EXECUTE_ADD_I1,
+    output  uint64              EXECUTE_ADD_I2,
+    output  uint32              EXECUTE_ADD_INSTRUCTION,
+    output  uint14              EXECUTE_ADD_ALUOP,
+    output  uint1               EXECUTE_ADD_SIGNX
+) <reginputs> {
+    always {
+        if( LATCH ) {
+            EXECUTE_ADD_INSTRUCTION = AGU_INSTRUCTION;
+            EXECUTE_ADD_ALUOP = AGU_ALUOP;
+            EXECUTE_ADD_SIGNX = AG_IS_ALU_SIGNX;
+            EXECUTE_ADD_I1 = AGU_I1;
+            EXECUTE_ADD_I2 = AGU_INSTRUCTION[5,1] ? AGU_I2 : { {52{AGU_INSTRUCTION[31,1]}}, Itype(AGU_INSTRUCTION).imm };
         }
     }
 }

@@ -3,15 +3,15 @@ unit bus(                                                                       
     input   uint1               clock_cpu,
     input   uint1               clock_decode,
 
-    input   uint$addr_width$    DMASOURCE,                                                                                        //  DMA ADDRESSES, BYTES TO TRANSFERS
+    input   uint$addr_width$    DMASOURCE,                                                                                      //  DMA ADDRESSES, BYTES TO TRANSFERS
     input   uint$addr_width$    DMASOURCEADD,
     input   uint$addr_width$    DMADEST,
     input   uint$addr_width$    DMADESTADD,
     input   uint$addr_width$    DMACOUNT,
-    input   uint8               DMACYCLES,                                                                                                  //  FOR RECTANGLE MODE, NUMBER OF LINES
-    input   uint32              DMASET,                                                                                                     //  CPU INPUT FOR SET VALUE
-    input   uint1               DMASTART,                                                                                                   //  START FLAG
-    input   uint8               DMAMODE,                                                                                                    //  TYPE OF DMA TRANSFER
+    input   uint8               DMACYCLES,                                                                                      //  FOR RECTANGLE MODE, NUMBER OF LINES
+    input   uint32              DMASET,                                                                                         //  CPU INPUT FOR SET VALUE
+    input   uint1               DMASTART,                                                                                       //  START FLAG
+    input   uint8               DMAMODE,                                                                                        //  TYPE OF DMA TRANSFER
     output  uint1               DMAACTIVE,
 
     output  uint1               L_ADMA_ACTIVE,
@@ -49,9 +49,6 @@ unit bus(                                                                       
                         $$ STATE_BUS_CPU_COPY       = 16
     uint5               NEXT_STATE = uninitialised;
 
-    uint1               DMA_REQ <:: DMA.MEM_RENABLE | DMA.MEM_WENABLE;
-    uint1               CPU_REQ <:: CPU.MEM_RENABLE | CPU.MEM_WENABLE;
-
     cpu_memory CPU <@clock_cpu,!reset> (
         clock_cache <: clock_cache, clock_decode <: clock_decode,
 
@@ -68,7 +65,9 @@ unit bus(                                                                       
         DMADESTADD <: DMADESTADD,
         DMACOUNT <: DMACOUNT,
         DMACYCLES <: DMACYCLES,
-        DMASET <: DMASET
+        DMASET <: DMASET,
+        MEM_RDATA <: MEM_RDATA,
+        MEM_BUSY <: MEM_BUSY
     );
     dma_digital_audio DMA_AUDIO <@clock_cpu,!reset> (
         L_ADMA_ACTIVE :> L_ADMA_ACTIVE,
@@ -98,24 +97,24 @@ unit bus(                                                                       
     always {
         onehot( STATE ) {                                                                                                       // BUS MULTIPLEXER / DEMULTIPLEXER
             case 0: {                                                                                                           //  STATE_BUS_WAIT
-                MEM_ADDR = DMA_AUDIO.MEM_RENABLE ? DMA_AUDIO.MEM_ADDR : DMA_REQ ? DMA.MEM_ADDR : CPU.MEM_ADDR;
-                MEM_SIZE = DMA_AUDIO.MEM_RENABLE ? 2b10               : DMA_REQ ? DMA.MEM_SIZE : CPU.MEM_SIZE;
-                MEM_WDATA = DMA.MEM_WENABLE ? DMA.MEM_WDATA : CPU.MEM_WDATA;
+                MEM_ADDR = DMA_AUDIO.MEM_RENABLE ? DMA_AUDIO.MEM_ADDR : CPU.MEM_ADDR;
+                MEM_SIZE = DMA_AUDIO.MEM_RENABLE ? 2b10               : CPU.MEM_SIZE;
+                MEM_WDATA = CPU.MEM_WDATA;
+
                 if( DMA_AUDIO.MEM_RENABLE ) {                                                                                   //  PROCESS DMA_AUDIO REQUEST
                     MEM_RENABLE = 1;
                     DMA_AUDIO.MEM_ACK = 1; DMA_AUDIO.MEM_BUSY = 1;
 
                     NEXT_STATE = $STATE_BUS_DMA_AUDIO_COPY$; STATE = $STATE_BUS_BUSY_WAIT$;
                 } else {
-                    if( DMA.MEM_RENABLE | DMA.MEM_WENABLE ) {                                                                   //  PROCESS DMA REQUEST
-                        MEM_RENABLE = DMA.MEM_RENABLE; MEM_WENABLE = DMA.MEM_WENABLE;
-                        DMA.MEM_ACK = 1; DMA.MEM_BUSY = 1;
+                    if( DMA.DMAACTIVE ) {                                                                                       //  GRANT BUS TO DMA ENGINE
+                        DMA.MEM_ACK = 1;
 
-                        NEXT_STATE = $STATE_BUS_DMA_COPY$; STATE = $STATE_BUS_BUSY_WAIT$;
+                        STATE = $STATE_BUS_DMA_COPY$;
                     } else {
                         if( CPU.MEM_RENABLE | CPU.MEM_WENABLE ) {                                                               //  PROCESS CPU REQUEST
                             MEM_RENABLE = CPU.MEM_RENABLE; MEM_WENABLE = CPU.MEM_WENABLE;
-                            CPU.MEM_ACK = 1; CPU.MEM_BUSY= 1;
+                            CPU.MEM_ACK = 1; CPU.MEM_BUSY = 1;
 
                             NEXT_STATE = $STATE_BUS_CPU_COPY$; STATE = $STATE_BUS_BUSY_WAIT$;
                         }
@@ -124,10 +123,19 @@ unit bus(                                                                       
             }
             case 1: { if( ~MEM_BUSY ) { STATE = NEXT_STATE; } }                                                                 //  STATE_BUS_BUSY_WAIT
             case 2: { DMA_AUDIO.MEM_RDATA = MEM_RDATA; DMA_AUDIO.MEM_BUSY = 0; STATE = $STATE_BUS_WAIT$; }                      //  STATE_BUS_DMA_AUDIO_COPY
-            case 3: { DMA.MEM_RDATA = MEM_RDATA; DMA.MEM_BUSY = 0; STATE = $STATE_BUS_WAIT$; }                //  STATE_BUS_DMA_COPY
-            case 4: { CPU.MEM_RDATA = MEM_RDATA; CPU.MEM_BUSY = 0; STATE = $STATE_BUS_WAIT$; }                //  STATE_BUS_CPU_COPY
+            case 3: {                                                                                                           //  STATE_BUS_DMA_COPY
+                // Copy requests natively without interrupting DMA with handshakes
+                MEM_ADDR = DMA.MEM_ADDR;
+                MEM_SIZE = DMA.MEM_SIZE;
+                MEM_WDATA = DMA.MEM_WDATA;
+                MEM_RENABLE = DMA.MEM_RENABLE;
+                MEM_WENABLE = DMA.MEM_WENABLE;
+
+                if( ~DMA.DMAACTIVE ) { STATE = $STATE_BUS_WAIT$; }
+            }
+            case 4: { CPU.MEM_RDATA = MEM_RDATA; CPU.MEM_BUSY = 0; STATE = $STATE_BUS_WAIT$; }                                  //  STATE_BUS_CPU_COPY
         }
 
-        if( reset ) { DMA_AUDIO.MEM_BUSY = 0; DMA.MEM_BUSY = 0; CPU.MEM_BUSY = 0; STATE = $STATE_BUS_WAIT$; }
+        if( reset ) { DMA_AUDIO.MEM_BUSY = 0; CPU.MEM_BUSY = 0; STATE = $STATE_BUS_WAIT$; }
     }
 }

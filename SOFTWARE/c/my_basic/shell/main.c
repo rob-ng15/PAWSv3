@@ -1011,6 +1011,286 @@ static void _show_help(void) {
 	_printf("          Usage: DIR [p], p is a directory path\n");
 }
 
+/*
+ * * {========================================================
+ ** PAWS Visual Screen Editor & Wrappers
+ */
+
+#define _ED_MAX_LINES 512
+#define _ED_MAX_COLS  128
+
+#ifndef KEY_F
+#   define KEY_F(n)      (0x0108 + (n))
+#endif
+
+/* Raw PS/2 Extended Scan Codes used by PAWS ps2_inputcharacter() */
+#define PS2_KEY_UP    0xE048
+#define PS2_KEY_DOWN  0xE050
+#define PS2_KEY_LEFT  0xE04B
+#define PS2_KEY_RIGHT 0xE04D
+
+static char ed_lines[_ED_MAX_LINES][_ED_MAX_COLS];
+static int ed_count = 0;
+
+/* PAWS Graphics Wrappers for MY-BASIC */
+static int _basic_draw_line(struct mb_interpreter_t* s, void** l) {
+	int result = MB_FUNC_OK;
+	int_t x1, y1, x2, y2, color;
+
+	mb_check(mb_attempt_open_bracket(s, l));
+	mb_check(mb_pop_int(s, l, &x1));
+	mb_check(mb_pop_int(s, l, &y1));
+	mb_check(mb_pop_int(s, l, &x2));
+	mb_check(mb_pop_int(s, l, &y2));
+	mb_check(mb_pop_int(s, l, &color));
+	mb_check(mb_attempt_close_bracket(s, l));
+
+	gpu_line((unsigned char)color, (short)x1, (short)y1, (short)x2, (short)y2);
+	return result;
+}
+
+static int _basic_draw_rectangle(struct mb_interpreter_t* s, void** l) {
+	int result = MB_FUNC_OK;
+	int_t x1, y1, x2, y2, color;
+
+	mb_check(mb_attempt_open_bracket(s, l));
+	mb_check(mb_pop_int(s, l, &x1));
+	mb_check(mb_pop_int(s, l, &y1));
+	mb_check(mb_pop_int(s, l, &x2));
+	mb_check(mb_pop_int(s, l, &y2));
+	mb_check(mb_pop_int(s, l, &color));
+	mb_check(mb_attempt_close_bracket(s, l));
+
+	gpu_rectangle((unsigned char)color, (short)x1, (short)y1, (short)x2, (short)y2);
+	return result;
+}
+
+/* A safe screen clear that bypasses PAWS DMA heap overflow bugs */
+static void paws_safe_clear(void) {
+	if (!stdscr || !stdscr->buffer) return;
+	__curses_cell cell;
+	cell.bitfield = 0;
+	cell.cell.character = ' ';
+	cell.cell.foreground = stdscr->foreground;
+	cell.cell.background = stdscr->background;
+
+	/* Direct CPU memory write avoids buggy DMA hardware calls */
+	for (int i = 0; i < stdscr->w * stdscr->h; ++i) {
+		stdscr->buffer[i] = cell.bitfield;
+	}
+	stdscr->cx = 0;
+	stdscr->cy = 0;
+	refresh();
+}
+
+static void _draw_editor(int top_line, int cur_y, int cur_x) {
+	int rows = stdscr ? stdscr->h : LINES;
+	int cols = stdscr ? stdscr->w : COLS;
+
+	__curses_cell cell;
+	cell.bitfield = 0;
+	cell.cell.background = stdscr->background;
+	cell.cell.foreground = stdscr->foreground;
+
+	/* 1. Draw text lines directly to buffer to prevent cursor wrap artifacts */
+	for (int r = 0; r < rows - 1; ++r) {
+		int idx = top_line + r;
+		int c = 0;
+		if (idx < ed_count) {
+			const char *str = ed_lines[idx];
+			while (str[c] && c < cols) {
+				cell.cell.character = str[c];
+				stdscr->buffer[r * cols + c] = cell.bitfield;
+				c++;
+			}
+		}
+		/* Clear remainder of line */
+		cell.cell.character = ' ';
+		while (c < cols) {
+			stdscr->buffer[r * cols + c] = cell.bitfield;
+			c++;
+		}
+	}
+
+	/* 2. Draw status bar directly */
+	cell.cell.background = stdscr->foreground;
+	cell.cell.foreground = stdscr->background;
+	char status[80];
+	snprintf(status, sizeof(status), "[Ctrl+R] Run | [ESC] Quit | Ln: %d, Col: %d", cur_y + 1, cur_x + 1);
+	int slen = strlen(status);
+	for (int c = 0; c < cols; ++c) {
+		cell.cell.character = (c < slen) ? status[c] : ' ';
+		stdscr->buffer[(rows - 1) * cols + c] = cell.bitfield;
+	}
+
+	stdscr->cy = cur_y - top_line;
+	stdscr->cx = cur_x;
+	refresh();
+}
+
+static void _visual_editor(void) {
+	ed_count = 0;
+	if (_code() && _code()->count > 0) {
+		for (int i = 0; i < _code()->count && i < _ED_MAX_LINES; ++i) {
+			const char* src = _code()->lines[i];
+			int len = 0;
+			while (src[len] && src[len] != '\r' && src[len] != '\n' && len < _ED_MAX_COLS - 1) {
+				ed_lines[i][len] = src[len];
+				len++;
+			}
+			ed_lines[i][len] = '\0';
+			ed_count++;
+		}
+	}
+	if (ed_count == 0) {
+		ed_lines[0][0] = '\0';
+		ed_count = 1;
+	}
+
+	int cur_y = 0;
+	int cur_x = 0;
+	int top_line = 0;
+	int ch = 0;
+
+	keypad(stdscr, TRUE);
+	paws_safe_clear();
+
+	while (1) {
+		int rows = stdscr ? stdscr->h : LINES;
+		int text_rows = rows - 1;
+
+		if (cur_y < top_line)
+			top_line = cur_y;
+		if (cur_y >= top_line + text_rows)
+			top_line = cur_y - text_rows + 1;
+
+		_draw_editor(top_line, cur_y, cur_x);
+		ch = getch();
+
+		if (ch == 27 || ch == 17 || ch == 3 || ch == KEY_F(10)) {
+			break;
+		}
+
+		if (ch == 18 || ch == KEY_F(5)) {
+			_clear_code();
+			for (int i = 0; i < ed_count; ++i) {
+				_append_line(ed_lines[i]);
+			}
+
+			paws_safe_clear();
+			noscroll(); /* ABSOLUTELY CRITICAL: Prevents DMA heap corruption if BASIC prints to bottom of screen */
+
+			printw("--- Running BASIC ---\n\n");
+			refresh();
+
+			int run_res = mb_reset(&bas, false);
+			for (int i = 0; i < _code()->count && run_res == MB_FUNC_OK; ++i) {
+				run_res = mb_load_string(bas, _code()->lines[i], false);
+			}
+			if (run_res == MB_FUNC_OK) {
+				mb_run(bas, true);
+			}
+
+			printw("\n\n[Press any key to return to editor]");
+			refresh();
+			getch();
+			paws_safe_clear();
+			continue;
+		}
+
+		int len = (int)strlen(ed_lines[cur_y]);
+
+		switch (ch) {
+			case PS2_KEY_UP:
+			case 16: /* Ctrl+P */
+				if (cur_y > 0) {
+					cur_y--;
+					int prev_len = (int)strlen(ed_lines[cur_y]);
+					if (cur_x > prev_len) cur_x = prev_len;
+				}
+				break;
+
+			case PS2_KEY_DOWN:
+			case 14: /* Ctrl+N */
+				if (cur_y < ed_count - 1) {
+					cur_y++;
+					int next_len = (int)strlen(ed_lines[cur_y]);
+					if (cur_x > next_len) cur_x = next_len;
+				}
+				break;
+
+			case PS2_KEY_LEFT:
+			case 2:  /* Ctrl+B */
+				if (cur_x > 0) cur_x--;
+				break;
+
+			case PS2_KEY_RIGHT:
+			case 6:  /* Ctrl+F */
+				if (cur_x < len) cur_x++;
+				break;
+
+			case '\t':
+				for (int s = 0; s < 4; ++s) {
+					len = (int)strlen(ed_lines[cur_y]);
+					if (len < _ED_MAX_COLS - 2) {
+						memmove(&ed_lines[cur_y][cur_x + 1], &ed_lines[cur_y][cur_x], len - cur_x + 1);
+						ed_lines[cur_y][cur_x] = ' ';
+						cur_x++;
+					}
+				}
+				break;
+
+			case 8:   /* Backspace */
+			case 127: /* DEL */
+				if (cur_x > 0) {
+					memmove(&ed_lines[cur_y][cur_x - 1], &ed_lines[cur_y][cur_x], len - cur_x + 1);
+					cur_x--;
+				} else if (cur_y > 0) {
+					int prev_len = (int)strlen(ed_lines[cur_y - 1]);
+					if (prev_len + len < _ED_MAX_COLS - 1) {
+						strcat(ed_lines[cur_y - 1], ed_lines[cur_y]);
+						for (int i = cur_y; i < ed_count - 1; ++i) {
+							strcpy(ed_lines[i], ed_lines[i + 1]);
+						}
+						ed_count--;
+						cur_y--;
+						cur_x = prev_len;
+					}
+				}
+				break;
+
+			case '\n':
+			case '\r':
+				if (ed_count < _ED_MAX_LINES) {
+					for (int i = ed_count; i > cur_y + 1; --i) {
+						strcpy(ed_lines[i], ed_lines[i - 1]);
+					}
+					strcpy(ed_lines[cur_y + 1], &ed_lines[cur_y][cur_x]);
+					ed_lines[cur_y][cur_x] = '\0';
+					ed_count++;
+					cur_y++;
+					cur_x = 0;
+				}
+				break;
+
+			default:
+				if (ch >= 32 && ch <= 126 && len < _ED_MAX_COLS - 2) {
+					memmove(&ed_lines[cur_y][cur_x + 1], &ed_lines[cur_y][cur_x], len - cur_x + 1);
+					ed_lines[cur_y][cur_x] = (char)ch;
+					cur_x++;
+				}
+				break;
+		}
+	}
+
+	_clear_code();
+	for (int i = 0; i < ed_count; ++i) {
+		_append_line(ed_lines[i]);
+	}
+	paws_safe_clear();
+}
+/* ========================================================} */
+
 static int _do_line(void) {
 	int result = MB_FUNC_OK;
 	char line[_MAX_LINE_LENGTH];
@@ -1059,7 +1339,9 @@ static int _do_line(void) {
 		char* ne = 0;
 		strtok(no, " ");
 		ne = no + strlen(no) + 1;
-		if(!(*ne))
+		if(!(*no))
+			_visual_editor();
+		else if(!(*ne))
 			_edit_program(no);
 		else if(_str_eq(no, "-I"))
 			_insert_program(ne);
@@ -1514,7 +1796,13 @@ static void _on_startup(void) {
 
 	mb_open(&bas);
 
+	mb_set_printer(bas, printw); /* Safely route BASIC PRINT directly to curses */
+
+	mb_register_func(bas, "DRAW_LINE", _basic_draw_line);
+	mb_register_func(bas, "DRAW_RECTANGLE", _basic_draw_rectangle);
+
 	mb_debug_set_stepped_handler(bas, _on_stepped);
+
 	mb_set_error_handler(bas, _on_error);
 	mb_set_import_handler(bas, _on_import);
 

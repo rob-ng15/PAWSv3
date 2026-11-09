@@ -58,7 +58,6 @@ unit cpu_fetch(
     compressed01 COMPRESSED01 <@clock_decode> ( i16 <: MEM_INSTRUCTION[2,14] );
     compressed10 COMPRESSED10 <@clock_decode> ( i16 <: MEM_INSTRUCTION[2,14] );
     custom_convert CUSTOM <@clock_decode> ( INSTRUCTION <: MEM_INSTRUCTION );
-    custom_multi MULTI <@clock_decode> ( INSTRUCTION <: THIS_INSTRUCTION );
 
     uint1               IS_BRANCH <:: ( THIS_INSTRUCTION[2,5] == 5b11000 );
     uint3               BRANCH_PENDING = uninitialised;
@@ -72,9 +71,11 @@ unit cpu_fetch(
                                                                                MEM_INSTRUCTION;
     uint1               THIS_COMPRESSED <: ICACHE.tagmatch ? ICACHE.compressed : ~&MEM_INSTRUCTION[0,2];
     uint$addr_width$    NEXT_PC <:: ( ICACHE.tagmatch ? ICACHE.compressed : ~&MEM_INSTRUCTION[0,2] ) ? PC + 2 : PC + 4;
-    uint1               THIS_MULTI <:: ( THIS_INSTRUCTION[2,5] == 5b00010 ) & ( ( Rtype(THIS_INSTRUCTION).f3 == 3b100 ) | ( Rtype(THIS_INSTRUCTION).f3 == 3b101 ) );
-    uint12              MULTI_OFFSET <:: ( THIS_INSTRUCTION[25,2] ) << ( &THIS_INSTRUCTION[27,2] ? 4 : 3 );
-    uint12              MULTI_OFFSET_2 <:: MULTI_OFFSET + ( &THIS_INSTRUCTION[27,2] ? 8 : 4 );
+
+    uint1               IS_MEMPAIR <:: &THIS_INSTRUCTION[29,3];
+    uint1               THIS_MULTI <:: ( THIS_INSTRUCTION[2,5] == 5b00010 ) & ( ( Rtype(THIS_INSTRUCTION).f3 == 3b100 ) | ( Rtype(THIS_INSTRUCTION).f3 == 3b101 ) ) & ( IS_MEMPAIR | THIS_INSTRUCTION[27,1] );
+    uint12              MULTI_OFFSET <:: &THIS_INSTRUCTION[27,2] ? { 6b0, THIS_INSTRUCTION[25,2], 4b0000 } : { 7b0, THIS_INSTRUCTION[25,2], 3b000 };
+    uint12              MULTI_OFFSET_2 <:: &THIS_INSTRUCTION[27,2] ? { 6b0, THIS_INSTRUCTION[25,2], 4b1000 } : { 7b0, THIS_INSTRUCTION[25,2], 3b100 };
     uint12              INDEX_INC <:: { {7{THIS_INSTRUCTION[24,1]}}, THIS_INSTRUCTION[20,5] } << THIS_INSTRUCTION[25,2];
 
     simple_dualport_bram uint$32+L1Ipartaddresswidth$ L1cache <@clock_cache,@clock> [$L1Iblocks$] = uninitialized;              // SMALL ON CPU L1 CACHE - 1 per HART - RESET FENCE MEM IS 1
@@ -141,8 +142,8 @@ unit cpu_fetch(
                     DECODE_BA = BA;
                     DECODE_PRED_TABLE = { BP_R.TAGMATCH, BP_R.PREDICTION };
 
-                    if( THIS_MULTI & MULTI.FLAGS[0,1] ) {
-                        if( ( MULTI.FLAGS[4,1] & MULTI_STEP ) | ( MULTI.FLAGS[3,1] & ~MULTI_STEP ) ) {                          // PRE or POST INCREMENT
+                    if( THIS_MULTI ) {
+                        if( ~IS_MEMPAIR & ( THIS_INSTRUCTION[28,1] ? MULTI_STEP : ~MULTI_STEP ) ) {                             // PRE or POST INCREMENT
                             DECODE_INSTRUCTION = {
                                 INDEX_INC,
                                 THIS_INSTRUCTION[15,5],
@@ -151,7 +152,7 @@ unit cpu_fetch(
                                 7b0010011
                             };
                         } else {
-                            if( |MULTI.FLAGS[3,2] ) {
+                            if( ~IS_MEMPAIR ) {
                                 if( THIS_INSTRUCTION[12,1] ) {
                                     DECODE_INSTRUCTION = {                                                                      // STORE INDEX PRE POST INCREMENT
                                         7b0000000,
@@ -173,11 +174,11 @@ unit cpu_fetch(
                             } else {
                                 if( THIS_INSTRUCTION[12,1] ) {
                                     DECODE_INSTRUCTION = {                                                                      // STORE MEMORY PAIR
-                                        MULTI_STEP ? MULTI_OFFSET_2[5,7] : MULTI_OFFSET[5,7],
+                                        MULTI_OFFSET[5,7],
                                         MULTI_STEP ? THIS_INSTRUCTION[20,5] : THIS_INSTRUCTION[7,5],
                                         THIS_INSTRUCTION[15,5],
                                         &THIS_INSTRUCTION[27,2] ? 3b011 : 3b010,
-                                        MULTI_OFFSET[0,5],
+                                        MULTI_STEP ? MULTI_OFFSET_2[0,5] : MULTI_OFFSET[0,5],
                                         7b0100011
                                     };
                                 } else {
@@ -202,22 +203,22 @@ unit cpu_fetch(
                     } else {
                         DECODE_INSTRUCTION = THIS_INSTRUCTION;
                         switch( THIS_INSTRUCTION[2,5] ) {
-                            case 5b11000 : {                                                                                        // BRANCH
-                                PC = BP_A.BP_ADDR;                                                                                  //  GET ADDRESSES FROM BRANCH PREDICTION
-                                STATE = $STATE_FETCH_NEXT$; DECODE_ACK = 1;                                                                         //  PASS BRANCH INSTRUCTION TO DECODE PIPELINE STAGE
+                            case 5b11000 : {                                                                                    // BRANCH
+                                PC = BP_A.BP_ADDR;                                                                              //  GET ADDRESSES FROM BRANCH PREDICTION
+                                STATE = $STATE_FETCH_NEXT$; DECODE_ACK = 1;                                                     //  PASS BRANCH INSTRUCTION TO DECODE PIPELINE STAGE
                             }
-                            case 5b11001 : { STATE = $STATE_FETCH_WAIT_JUMP$; DECODE_ACK = 1; }                                                     // JALR
-                            case 5b11011 : {                                                                                        // JAL ( NO REGISTERS USED )
-                                PC = JA;                                                                                            //  GO TO JAL ADDRESS
-                                STATE = $STATE_FETCH_NEXT$;                                                                         //  PASS TO DECODE PIPELINE STAGE TO HAVE RETURN ADDRESS SAVED
+                            case 5b11001 : { STATE = $STATE_FETCH_WAIT_JUMP$; DECODE_ACK = 1; }                                 // JALR
+                            case 5b11011 : {                                                                                    // JAL ( NO REGISTERS USED )
+                                PC = JA;                                                                                        //  GO TO JAL ADDRESS
+                                STATE = $STATE_FETCH_NEXT$;                                                                     //  PASS TO DECODE PIPELINE STAGE TO HAVE RETURN ADDRESS SAVED
                                 DECODE_ACK = 1;
                             }
-                            case 5b11100 : {                                                                                        // CSR ONLY PASS TO DECODE STAGE IF NOT ECALL WFI
+                            case 5b11100 : {                                                                                    // CSR ONLY PASS TO DECODE STAGE IF NOT ECALL WFI
                                 PC = ( FETCH_CSR.STATE == $STATE_FETCH_ECALL$ ) ? PC : NEXT_PC;
                                 STATE = FETCH_CSR.STATE; DECODE_ACK = FETCH_CSR.DECODE_ACK;
                                 DECODE_ACK = FETCH_CSR.DECODE_ACK;
                             }
-                            default: { PC = NEXT_PC; STATE = $STATE_FETCH_NEXT$; DECODE_ACK = 1; }                                                  // PASS ALL OTHER INSTRUCTIONS TO DECODE PIPELINE STAGE
+                            default: { PC = NEXT_PC; STATE = $STATE_FETCH_NEXT$; DECODE_ACK = 1; }                              // PASS ALL OTHER INSTRUCTIONS TO DECODE PIPELINE STAGE
                         }
                     }
                 }
@@ -242,10 +243,7 @@ unit cpu_fetch(
             case 9: {                                                                                                           // STATE_FETCH_ECALL
                 if( ~|BRANCH_PENDING ) {
                     CSR_ECALL_REQ = 1;
-
-                    if( CSR_IRQ_PENDING ) {
-                        STATE = $STATE_FETCH_IRQ_START$;
-                    }
+                    STATE = $STATE_FETCH_IRQ_START$;
                 }
             }
 
@@ -302,11 +300,11 @@ unit cpu_fetch_csr(
     output  uint11              STATE
 ) <reginputs> {
     always {
-        DECODE_ACK = 0;                                                                                                         // DEFAULT TO NOT PASSING THROUGH TO DECODE PIPELINE STAGE
+        DECODE_ACK = 0;                                                                                                         // DEFAULT TO NOT PASSING TO DECODE PIPELINE STAGE
 
         switch( CSR ) {
             case 12b000000000000: { STATE = $STATE_FETCH_ECALL$; }                                                              //  ECALL               SOFTWARE INTERRUPT
-            case 12b000100000101: { STATE = $STATE_FETCH_WFI$; }                                                                //  WFI                 WAIT FOR INTERRUPT / HALT-CATCH-FIRE
+            case 12b000100000101: { STATE = $STATE_FETCH_WFI$; }                                                                //  WFI                 WAIT FOR INTERRUPT
             case 12b001100000010: { STATE = $STATE_FETCH_WAIT_JUMP$; DECODE_ACK = 1; }                                          //  MRET                MACHINE RETURN FROM INTERRUPT
             default: { STATE = $STATE_FETCH_NEXT$; DECODE_ACK = 1; }                                                            //  CSRR[[W][S][C]][I]  ALL OTHER CSR REGISTERS
         }
@@ -355,6 +353,7 @@ unit compressed00(
     i32 := ( 1 << 2 );                                                                                                          // DEFAULT TO NOP ADDI x0, x0, 0
 
     always {
+
         switch( CBalu(i16).f3 ) {
             case 3b000: {
                 // ADDI4SPN -> addi rd', x2, nzuimm[9:2] { 000, nzuimm[5:4|9:6|2|3] rd' 00 } -> { imm[11:0] rs1 000 rd 0010011 }
@@ -674,14 +673,4 @@ unit custom_convert(
             }
         }
     }
-}
-
-unit custom_multi(
-    input   uint32  INSTRUCTION,
-    output  uint5   FLAGS
-) <reginputs> {
-    // { POST-INC, PRE-INC, SAVE, LOAD, MULTI_INSTRUCTION }
-    FLAGS := &INSTRUCTION[29,3] ? { 2b00, INSTRUCTION[12,1], ~INSTRUCTION[12,1], 1b1 } :                                        // MULTI-REGISTER LOAD/SAVE
-              INSTRUCTION[27,1] ? { INSTRUCTION[28,1], ~INSTRUCTION[28,1], INSTRUCTION[12,1], ~INSTRUCTION[12,1], 1b1 } :       // PRE-POST INCREMENT LOAD/SAVE
-                                  5b00000;                                                                                      // INDEXED LOAD/SAVE
 }

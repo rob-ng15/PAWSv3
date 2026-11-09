@@ -146,15 +146,17 @@ void set_tilemaps( void ) {
     set_tilemap_32x32tile_abs( 0, 19, 7, 13 );
 }
 
+// https://www.spriters-resource.com/fullview/25458/
+unsigned char car_spritesheet[] = {
+    #include "graphics/car-spritesheet.h"
+};
 
-// DRAW THE TRAFFIC IN FRONT OF THE CITY ( use sprites 16 - 31, sprite layer 1 ) and BEHIND THE CITY ( uses sprites 0 - 15, sprite layer 0 )
+// DRAW THE TRAFFIC IN FRONT OF THE CITY (use sprites 16 - 31, layer 1) and BEHIND (sprites 0 - 15, layer 0)
 #define SPRITE_YPOS 280
 unsigned char updateflags[] = { 31, 31, 31, 30, 30, 29, 29, 3, 3, 2, 2, 1, 1, 1 };
 void set_sprites() {
-    for( int i = 0; i < 8; i++ ) {
-        set_sprite_bitmaps( i * 2, &traffic_sprites[0] );
-        set_sprite_bitmaps( i * 2 + 16, &traffic_sprites[0] );
-    }
+    // Load traffic sprites starting at tile 0 in 16x16 mode
+    set_sprite_bitmaps( 0, &traffic_sprites[0], 2048 );
 
     unsigned short xpos[] = { 48, 64, 80, 48, 64, 48, 64, 64, 48, 64, 48, 80, 64, 48 };
     unsigned char tiles[] = { 5, 6, 7, 3, 4, 1, 2, 1, 2, 3, 4, 5, 6, 7 };
@@ -168,22 +170,36 @@ void set_sprites() {
     }
 }
 
-// https://www.spriters-resource.com/fullview/25458/
-unsigned char car_spritesheet[] = {
-    #include "graphics/car-spritesheet.h"
-};
-
+// DRAW THE FERRARI IN FRONT OF EVERYTHING ( use sprites 48 - 53, sprite layer 3 )
 #define FERRARI_y 400
-// DRAW THE FERRARI IN FRONT OF EVERYTHING ( use sprites 48 - 63, sprite layer 3 )
 void set_car_sprites( void ) {
-    set_sprite_bitamps_from_spritesheet( 48, 8, car_spritesheet, TRUE );
+    // 1. Load the TOP line (y = 0): LEFT HALVES (Level, Down, Up, blanks...)
+    // count = 8 ensures the 256-pixel stride is correct. Populates tiles 32 through 63.
+    set_sprite_bitamps_from_spritesheet( 32, 8, car_spritesheet, 1 );
 
-    set_sprite( 48, 0, 320-64, FERRARI_y, 0, SPRITE_LAYER_3 | SPRITE_DOUBLE | SPRITE_32X32 );                                        // LEVEL
-    set_sprite( 49, 0, 320, FERRARI_y, 1, SPRITE_LAYER_3 | SPRITE_DOUBLE | SPRITE_32X32 );
-    set_sprite( 50, 0, 320-64, FERRARI_y, 0, SPRITE_LAYER_3 | SPRITE_DOUBLE | SPRITE_32X32 );
-    set_sprite( 51, 0, 320, FERRARI_y, 1, SPRITE_LAYER_3 | SPRITE_DOUBLE | SPRITE_32X32 );
-    set_sprite( 52, 0, 320-64, FERRARI_y, 0, SPRITE_LAYER_3 | SPRITE_DOUBLE | SPRITE_32X32 );
-    set_sprite( 53, 0, 320, FERRARI_y, 1, SPRITE_LAYER_3 | SPRITE_DOUBLE | SPRITE_32X32 );
+    // 2. Load the BOTTOM line (y = 32): RIGHT HALVES (Level, Down, Up, blanks...)
+    // Advance the pointer by exactly 1 row of pixels (256 * 32 = 8192 bytes). Populates tiles 64 through 95.
+    set_sprite_bitamps_from_spritesheet( 64, 8, car_spritesheet + 8192, 1 );
+
+    unsigned short car_actions = (3 << 7) | SPRITE_DOUBLE | SPRITE_32X32;
+
+    // LEVEL
+    // Top line index 0 -> Left = Tile 32
+    // Bottom line index 0 -> Right = Tile 64
+    set_sprite( 48, 0, 320 - 64, FERRARI_y, 32, car_actions );
+    set_sprite( 49, 0, 320,      FERRARI_y, 64, car_actions );
+
+    // PITCH DOWN
+    // Top line index 1 -> Left = Tile 36
+    // Bottom line index 1 -> Right = Tile 68
+    set_sprite( 50, 0, 320 - 64, FERRARI_y, 36, car_actions );
+    set_sprite( 51, 0, 320,      FERRARI_y, 68, car_actions );
+
+    // PITCH UP
+    // Top line index 2 -> Left = Tile 40
+    // Bottom line index 2 -> Right = Tile 72
+    set_sprite( 52, 0, 320 - 64, FERRARI_y, 40, car_actions );
+    set_sprite( 53, 0, 320,      FERRARI_y, 72, car_actions );
 }
 
 // ROADSIDE ITEMS - AS DRAWLISTS FOR EASIER PLACEMENT AND SCALING
@@ -205,6 +221,7 @@ struct DrawList2D LEFTCHEVRON[] = {
     { DLQUAD, WHITE, DITHERSOLID, { -16, -48 }, { 0, -48 }, { 8, -32 }, { -8, -32 } },
     { DLQUAD, WHITE, DITHERSOLID, { -8, -64 }, { 8, -64 }, { 0, -48 }, { -16, -48 } },
 };
+
 struct DrawList2D RIGHTCHEVRON[] = {
     { DLRECT, GREY3, DITHERSOLID, { -4, 0 }, { 4, -32 }, },
     { DLRECT, BLACK, DITHERSOLID, { -32, -32 }, { 32, -64 }, },
@@ -398,15 +415,15 @@ typedef struct { float x,y,z,w; } vec4;
 typedef struct { int x,y,z,w; } ivec4;
 
 static inline vec3 make_vec3(float x, float y, float z) {
-  vec3 V;
-  V.x = x; V.y = y; V.z = z;
-  return V;
+    vec3 V;
+    V.x = x; V.y = y; V.z = z;
+    return V;
 }
 
 static inline vec4 make_vec4(float x, float y, float z, float w ) {
-  vec4 V;
-  V.x = x; V.y = y; V.z = z; V.w = w;
-  return V;
+    vec4 V;
+    V.x = x; V.y = y; V.z = z; V.w = w;
+    return V;
 }
 
 // PROJECT - TO HORIZONTAL CENTRE OF THE SCREEN, MOVE SLIGHTLY DOWN FOR VERTICAL CENTRE
@@ -575,7 +592,7 @@ void draw() {
                 break;
             case SIGN:
                 if( seg & 1 ) {
-                   lsprites[ i ] = road[cnr].bgl;
+                    lsprites[ i ] = road[cnr].bgl;
                 }
                 break;
             case BILLBOARD:
@@ -592,7 +609,7 @@ void draw() {
                 break;
             case SIGN:
                 if( seg & 1 ) {
-                   rsprites[ i ] = road[cnr].bgr;
+                    rsprites[ i ] = road[cnr].bgr;
                 }
                 break;
             case BILLBOARD:
@@ -636,8 +653,8 @@ void draw() {
                 DoDrawList2Dscale( LEFTBEAM, 10, spritesxyz[i].x - offset, spritesxyz[i].y, scale );
                 break;
             case SMALLBEAM:
-                    DoDrawList2Dscale( LEFTBEAMSMALL, 1, spritesxyz[i].x - offset, spritesxyz[i].y, scale );
-                 break;
+                DoDrawList2Dscale( LEFTBEAMSMALL, 1, spritesxyz[i].x - offset, spritesxyz[i].y, scale );
+                break;
             case BILLBOARD1:
                 DoDrawList2Dscale( LEFTBILLBOARD1, 7, spritesxyz[i].x - offset, spritesxyz[i].y, scale );
                 break;
@@ -717,7 +734,6 @@ int main( int argc, char **argv ) {
 
     bitmap_draw( 1 );
     gpu_cs();
-    //bitmap_draw( 1 );
     set_background_generator();
     set_tilemaps();
     set_sprites();
@@ -732,6 +748,7 @@ int main( int argc, char **argv ) {
     unsigned char framebuffer = 2;
     while( !( get_buttons() & 4 ) ) {
         bitmap_draw( framebuffer ); draw(); update(); wait_gpu_finished(); await_vblank();
+        // Place LAYER_SPRITES_3 before framebuffer so the Ferrari is visible in front of the road
         screen_order( LAYER_CHARACTERMAP, LAYER_SPRITES_3, framebuffer, LAYER_SPRITES_1, LAYER_TILEMAP_3, LAYER_SPRITES_0, LAYER_TILEMAP_2, LAYER_TILEMAP_0, FALSE, FALSE, FALSE );
         framebuffer = 3 - framebuffer;
 

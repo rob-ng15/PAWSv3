@@ -53,7 +53,7 @@ unit cpu_execute_csrfpu(
     input   uint3               CSR_INC_INSNRET                                                                                 // INSTRUCTION COMPLETION INCREMENT
 ) <reginputs> {
 $$if VERILATOR then
-    uint64  COMMITS[4] = { 0, 0, 0, 0 };
+    uint64  COMMITS[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
     uint24  COUNT = 0;
 $$end
 
@@ -180,7 +180,7 @@ $$end
     FPUcompare.F1_OR_F2_NAN := |( TYPE_F1.type[1,2] | TYPE_F2.type[1,2] );
     FPUcompare.F1_AND_F2_ZERO := ( TYPE_F1.type[0,1] & TYPE_F2.type[0,1] );
 
-    CSR.START := STATE[1,1] & FAST.READY & CONVERT.READY & CALC_FMA.READY & CALC_DIV.READY & CALC_SQRT.READY;
+    CSR.START := STATE[1,1] & ( ~|CSR( CSRFPU_INSTRUCTION ).csr[8,4] ? ( FAST.READY & CONVERT.READY & CALC_FMA.READY & CALC_DIV.READY & CALC_SQRT.READY ) : 1b1 );
     CONVERT.START := STATE[4,1] & CONVERT.READY;
     FAST.START := STATE[3,1] & FAST.READY;
     CALC_FMA.START := STATE[5,1] & CALC_FMA.READY & ( |ACTION[0,2] | ACTION[4,1] );
@@ -207,6 +207,7 @@ $$end
         onehot( STATE ) {
             case 0: {
                 RD = EXECUTE_CSRFPU_ACK << { $EX_CSRFPU_IS_WR_F$, Rtype( CSRFPU_INSTRUCTION ).rd };                             // SET REGISTER CONTENTION FLAG
+
                 if( EXECUTE_CSRFPU_ACK ) {                                                                                      // WAIT FOR AGU TO ACKNOWLEDGE INSTRUCTION IS READY
                     EXECUTE_CSRFPU_READY = 0;                                                                                   //  HALT AGU SENDING MORE INSTRUCTIONS
                     STATE =         $EX_CSRFPU_IS_CSR$ ? 2 :
@@ -297,11 +298,12 @@ $$end
         EXECUTE_CSRFPU_RD = RD | COMMIT_I.RD | FAST.RD | CONVERT.RD | { COMMIT_F.RD | CALC_FMA.RD | CALC_DIV.RD | CALC_SQRT.RD, 32h00000000 };
 
 $$if VERILATOR then
-        COMMITS[ CSR_INC_INSNRET & 3 ] = COMMITS[ CSR_INC_INSNRET & 3 ] + 1;
+        COMMITS[ CSR_INC_INSNRET ] = COMMITS[ CSR_INC_INSNRET ] + 1;
         COUNT = COUNT + 1;
         if( COUNT == 1000000 ) {
             COUNT = 0;
-            __display( "[ 0 = %d ] [ 1 = %d ] [ 2 = %d ] [ 3 = %d ]",COMMITS[0],COMMITS[1],COMMITS[2],COMMITS[3] );
+            __display( "[ 0 = %d ] [ 1 = %d ] [ 2 = %d ]",COMMITS[0],COMMITS[1],COMMITS[2] );
+            __display( "[ 3 = %d ] [ 4 = %d ] [ 5 = %d ] [ 6= %d ]",COMMITS[3],COMMITS[4],COMMITS[5],COMMITS[6] );
         }
 $$end
         if( reset ) { RD = 0; EXECUTE_CSRFPU_READY = 1; STATE = 1; }

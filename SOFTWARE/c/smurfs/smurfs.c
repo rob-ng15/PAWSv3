@@ -114,7 +114,8 @@ void displayreset( void ) {
     }
 
     // SET THE INITIAL SPRITES FROM THE SPRITESHEET
-    set_sprite_bitamps_from_spritesheet32x32( 0, &spritesheet_upper_1[0] );
+    // Uses the unified function: (tile_start, frame_count, buffer, 32x32_mode)
+    set_sprite_bitamps_from_spritesheet( 0, 8, &spritesheet_upper_1[0], 1 );
 
     // SET CLOUD TILEMAPS
     for( int i = 0; i < 6; i++ ) {
@@ -147,7 +148,7 @@ void display_village( void ) {
             tilemap_scroll( 0, TM_LEFT, 1 );
         }
         paws_memcpy_rectangle( (const void *restrict)(0x2020000+32*320), FD_village + FDx, 320, 320, FDwidth, 208 );
-        set_sprite32( 0, SPRITE_SHOW, 320, 416, (anim_number) & 7, SPRITE_DOUBLE );
+        set_sprite32( 0, SPRITE_SHOW, 320, 448, ((anim_number) & 7)*4, SPRITE_32X32 | SPRITE_DOUBLE );
         FDx+=2; if( !(FDx & 3) ) { anim_number++; if( BDx == 510 ) { BDx = 0; } else { BDx+=2; } }
     }
     while( FDx > 0 ) {
@@ -157,7 +158,7 @@ void display_village( void ) {
             tilemap_scroll( 0, TM_RIGHT, 1 );
         }
         paws_memcpy_rectangle( (const void *restrict)(0x2020000+32*320), FD_village + FDx, 320, 320, FDwidth, 208 );
-        set_sprite32( 0, SPRITE_SHOW, 320, 416, (anim_number) & 7, SPRITE_DOUBLE | REFLECT_X);
+        set_sprite32( 0, SPRITE_SHOW, 320, 448, ((anim_number) & 7)*4, SPRITE_32X32 | SPRITE_DOUBLE | REFLECT_X);
         FDx-=2; if( !(FDx & 3) ) { anim_number++; if( BDx == 0 ) { BDx = 510; } else { BDx-=2; } }
     }
 }

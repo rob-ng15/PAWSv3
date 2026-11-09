@@ -1,86 +1,125 @@
 // CPU PIPELINE STAGE 6A - COMMIT_I
-// CONTROL THE WRITING OF EXECUTION RESULTS TO INTEGER REGISTERS
-// CAN COMMIT ONE INSTRUCTION PER CYCLE
-// POLLS EXECUTION STAGE UNITS IN ORDER OF PRIORITY
-//  LSA-FASTBASE-ALU-CSRFFPU-DIVIDE
+// CONTROL THE WRITING OF EXECUTION RESULTS TO DUAL-BANK INTEGER REGISTERS
+// CAN COMMIT UP TO TWO INSTRUCTIONS PER CYCLE (ONE EVEN + ONE ODD)
 
 unit cpu_commit_i(
     $$for i=1,3 do
-    simple_dualport_bram_port1 I$i$,                                                                                            // INTEGER REGISTERS WRITE PORT
+    simple_dualport_bram_port1 I$i$_E,
+    simple_dualport_bram_port1 I$i$_O,
     $$end
-
-    input   uint1               EXECUTE_ALU_RESULT_READY,
-    output  uint1               COMMIT_EXECUTE_ALU_RESULT_ACK,
-    input   uint64              COMMIT_ALU_RESULT,                                                                              // FAST ALU EXECUTE RESULT
-    input   uint5               COMMIT_ALU_REGISTER,                                                                            // FAST ALU EXECUTE RESULT REGISTER
-
-    input   uint1               EXECUTE_LSA_RESULT_READY,
-    output  uint1               COMMIT_EXECUTE_LSA_RESULT_ACK,
-    input   uint64              COMMIT_LSA_RESULT,                                                                              // FAST LSA EXECUTE RESULT
-    input   uint5               COMMIT_LSA_REGISTER,                                                                            // FAST LSA EXECUTE RESULT REGISTER
-
-    input   uint1               EXECUTE_CSRFPU_RESULT_READY,
-    output  uint1               COMMIT_EXECUTE_CSRFPU_RESULT_ACK,
-    input   uint64              COMMIT_CSRFPU_RESULT,                                                                           // CSR AND FPU EXECUTE RESULT
-    input   uint5               COMMIT_CSRFPU_REGISTER,                                                                         // CSR AND FPU EXECUTE RESULT REGISTER
-
-
-    input   uint1               EXECUTE_ALUDIVIDE_RESULT_READY,
-    output  uint1               COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK,
-    input   uint64              COMMIT_ALUDIVIDE_RESULT,                                                                        // ALU DIVISION EXECUTE RESULT
-    input   uint5               COMMIT_ALUDIVIDE_REGISTER,                                                                      // ALU DIVISION EXECUTE RESULT REGISTER
 
     input   uint1               EXECUTE_FASTBASE_RESULT_READY,
     output  uint1               COMMIT_EXECUTE_FASTBASE_RESULT_ACK,
-    input   uint64              COMMIT_FASTBASE_RESULT,                                                                           // CSR AND FPU EXECUTE RESULT
-    input   uint5               COMMIT_FASTBASE_REGISTER,                                                                         // CSR AND FPU EXECUTE RESULT REGISTER
+    input   uint64              COMMIT_FASTBASE_RESULT,
+    input   uint5               COMMIT_FASTBASE_REGISTER,
 
-    output  uint32              COMMIT_RD                                                                                       // INSTRUCTION COMMIT IS WRITING TO { FLOAT, RD }
+    // BRAND NEW DEDICATED ADD PIPELINE INPUT
+    input   uint1               EXECUTE_ADD_RESULT_READY,
+    output  uint1               COMMIT_EXECUTE_ADD_RESULT_ACK,
+    input   uint64              COMMIT_ADD_RESULT,
+    input   uint5               COMMIT_ADD_REGISTER,
+
+    input   uint1               EXECUTE_ALU_RESULT_READY,
+    output  uint1               COMMIT_EXECUTE_ALU_RESULT_ACK,
+    input   uint64              COMMIT_ALU_RESULT,
+    input   uint5               COMMIT_ALU_REGISTER,
+
+    input   uint1               EXECUTE_CSRFPU_RESULT_READY,
+    output  uint1               COMMIT_EXECUTE_CSRFPU_RESULT_ACK,
+    input   uint64              COMMIT_CSRFPU_RESULT,
+    input   uint5               COMMIT_CSRFPU_REGISTER,
+
+    input   uint1               EXECUTE_LSA_RESULT_READY,
+    output  uint1               COMMIT_EXECUTE_LSA_RESULT_ACK,
+    input   uint64              COMMIT_LSA_RESULT,
+    input   uint5               COMMIT_LSA_REGISTER,
+
+    input   uint1               EXECUTE_ALUDIVIDE_RESULT_READY,
+    output  uint1               COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK,
+    input   uint64              COMMIT_ALUDIVIDE_RESULT,
+    input   uint5               COMMIT_ALUDIVIDE_REGISTER,
+
+    output  uint32              COMMIT_RD
 ) <reginputs> {
-    uint5   ADDR <: EXECUTE_FASTBASE_RESULT_READY ? COMMIT_FASTBASE_REGISTER :
-                    EXECUTE_ALU_RESULT_READY ? COMMIT_ALU_REGISTER :
-                    EXECUTE_CSRFPU_RESULT_READY ? COMMIT_CSRFPU_REGISTER :
-                    EXECUTE_LSA_RESULT_READY ? COMMIT_LSA_REGISTER :
-                    EXECUTE_ALUDIVIDE_RESULT_READY ? COMMIT_ALUDIVIDE_REGISTER :
-                    0;
-    uint1   WENABLE <: |ADDR;
-    uint64  WDATA <: EXECUTE_FASTBASE_RESULT_READY ? COMMIT_FASTBASE_RESULT :
-                    EXECUTE_ALU_RESULT_READY ? COMMIT_ALU_RESULT :
-                    EXECUTE_CSRFPU_RESULT_READY ? COMMIT_CSRFPU_RESULT :
-                    EXECUTE_LSA_RESULT_READY ? COMMIT_LSA_RESULT :
-                    COMMIT_ALUDIVIDE_RESULT;
 
+    // =========================================================================
+    // EVEN BANK ARBITRATION (Bit 0 == 0)
+    // Priority: FASTBASE -> ADD -> ALU -> CSRFPU -> LSA -> ALUDIVIDE
+    // =========================================================================
+    uint1 FASTBASE_ACK_E  <:: EXECUTE_FASTBASE_RESULT_READY & ~COMMIT_FASTBASE_REGISTER[0,1];
+    uint1 ADD_ACK_E       <:: EXECUTE_ADD_RESULT_READY      & ~COMMIT_ADD_REGISTER[0,1]       & ~FASTBASE_ACK_E;
+    uint1 ALU_ACK_E       <:: EXECUTE_ALU_RESULT_READY      & ~COMMIT_ALU_REGISTER[0,1]       & ~FASTBASE_ACK_E & ~ADD_ACK_E;
+    uint1 CSRFPU_ACK_E    <:: EXECUTE_CSRFPU_RESULT_READY   & ~COMMIT_CSRFPU_REGISTER[0,1]    & ~FASTBASE_ACK_E & ~ADD_ACK_E & ~ALU_ACK_E;
+    uint1 LSA_ACK_E       <:: EXECUTE_LSA_RESULT_READY      & ~COMMIT_LSA_REGISTER[0,1]       & ~FASTBASE_ACK_E & ~ADD_ACK_E & ~ALU_ACK_E & ~CSRFPU_ACK_E;
+    uint1 ALUDIVIDE_ACK_E <:: EXECUTE_ALUDIVIDE_RESULT_READY& ~COMMIT_ALUDIVIDE_REGISTER[0,1] & ~FASTBASE_ACK_E & ~ADD_ACK_E & ~ALU_ACK_E & ~CSRFPU_ACK_E & ~LSA_ACK_E;
+
+    uint4 ADDR_E <:: FASTBASE_ACK_E  ? COMMIT_FASTBASE_REGISTER[1,4] :
+                    ADD_ACK_E       ? COMMIT_ADD_REGISTER[1,4] :
+                    ALU_ACK_E       ? COMMIT_ALU_REGISTER[1,4] :
+                    CSRFPU_ACK_E    ? COMMIT_CSRFPU_REGISTER[1,4] :
+                    LSA_ACK_E       ? COMMIT_LSA_REGISTER[1,4] :
+                    COMMIT_ALUDIVIDE_REGISTER[1,4];
+
+    uint64 WDATA_E <:: FASTBASE_ACK_E ? COMMIT_FASTBASE_RESULT :
+                        ADD_ACK_E      ? COMMIT_ADD_RESULT :
+                        ALU_ACK_E      ? COMMIT_ALU_RESULT :
+                        CSRFPU_ACK_E   ? COMMIT_CSRFPU_RESULT :
+                        LSA_ACK_E      ? COMMIT_LSA_RESULT :
+                        COMMIT_ALUDIVIDE_RESULT;
+
+    uint1 WENABLE_E <:: ( FASTBASE_ACK_E  & |COMMIT_FASTBASE_REGISTER ) |
+                        ( ADD_ACK_E       & |COMMIT_ADD_REGISTER ) |
+                        ( ALU_ACK_E       & |COMMIT_ALU_REGISTER ) |
+                        ( CSRFPU_ACK_E    & |COMMIT_CSRFPU_REGISTER ) |
+                        ( LSA_ACK_E       & |COMMIT_LSA_REGISTER ) |
+                        ( ALUDIVIDE_ACK_E & |COMMIT_ALUDIVIDE_REGISTER );
+
+    // =========================================================================
+    // ODD BANK ARBITRATION (Bit 0 == 1)
+    // Priority: FASTBASE -> ADD -> ALU -> CSRFPU -> LSA -> ALUDIVIDE
+    // =========================================================================
+    uint1 FASTBASE_ACK_O  <:: EXECUTE_FASTBASE_RESULT_READY & COMMIT_FASTBASE_REGISTER[0,1];
+    uint1 ADD_ACK_O       <:: EXECUTE_ADD_RESULT_READY      & COMMIT_ADD_REGISTER[0,1]       & ~FASTBASE_ACK_O;
+    uint1 ALU_ACK_O       <:: EXECUTE_ALU_RESULT_READY      & COMMIT_ALU_REGISTER[0,1]       & ~FASTBASE_ACK_O & ~ADD_ACK_O;
+    uint1 CSRFPU_ACK_O    <:: EXECUTE_CSRFPU_RESULT_READY   & COMMIT_CSRFPU_REGISTER[0,1]    & ~FASTBASE_ACK_O & ~ADD_ACK_O & ~ALU_ACK_O;
+    uint1 LSA_ACK_O       <:: EXECUTE_LSA_RESULT_READY      & COMMIT_LSA_REGISTER[0,1]       & ~FASTBASE_ACK_O & ~ADD_ACK_O & ~ALU_ACK_O & ~CSRFPU_ACK_O;
+    uint1 ALUDIVIDE_ACK_O <:: EXECUTE_ALUDIVIDE_RESULT_READY& COMMIT_ALUDIVIDE_REGISTER[0,1] & ~FASTBASE_ACK_O & ~ADD_ACK_O & ~ALU_ACK_O & ~CSRFPU_ACK_O & ~LSA_ACK_O;
+
+    uint4 ADDR_O <:: FASTBASE_ACK_O  ? COMMIT_FASTBASE_REGISTER[1,4] :
+                    ADD_ACK_O       ? COMMIT_ADD_REGISTER[1,4] :
+                    ALU_ACK_O       ? COMMIT_ALU_REGISTER[1,4] :
+                    CSRFPU_ACK_O    ? COMMIT_CSRFPU_REGISTER[1,4] :
+                    LSA_ACK_O       ? COMMIT_LSA_REGISTER[1,4] :
+                    COMMIT_ALUDIVIDE_REGISTER[1,4];
+
+    uint64 WDATA_O <:: FASTBASE_ACK_O ? COMMIT_FASTBASE_RESULT :
+                        ADD_ACK_O      ? COMMIT_ADD_RESULT :
+                        ALU_ACK_O      ? COMMIT_ALU_RESULT :
+                        CSRFPU_ACK_O   ? COMMIT_CSRFPU_RESULT :
+                        LSA_ACK_O      ? COMMIT_LSA_RESULT :
+                        COMMIT_ALUDIVIDE_RESULT;
+
+    uint1 WENABLE_O <:: FASTBASE_ACK_O | ADD_ACK_O | ALU_ACK_O | CSRFPU_ACK_O | LSA_ACK_O | ALUDIVIDE_ACK_O;
+
+    // =========================================================================
+    // DRIVE BRAM WRITE PORTS AND STAGE ACKNOWLEDGES
+    // =========================================================================
     $$for i=1,3 do
-    I$i$.wenable1 := WENABLE;
-    I$i$.addr1 := ADDR;
-    I$i$.wdata1 := WDATA;
+    I$i$_E.wenable1 := WENABLE_E;
+    I$i$_E.addr1 := ADDR_E;
+    I$i$_E.wdata1 := WDATA_E;
+
+    I$i$_O.wenable1 := WENABLE_O;
+    I$i$_O.addr1 := ADDR_O;
+    I$i$_O.wdata1 := WDATA_O;
     $$end
 
-    COMMIT_EXECUTE_ALU_RESULT_ACK := 0;
-    COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK := 0;
-    COMMIT_EXECUTE_CSRFPU_RESULT_ACK := 0;
-    COMMIT_EXECUTE_FASTBASE_RESULT_ACK := 0;
-    COMMIT_EXECUTE_LSA_RESULT_ACK := 0;
+    COMMIT_EXECUTE_FASTBASE_RESULT_ACK  := FASTBASE_ACK_E  | FASTBASE_ACK_O;
+    COMMIT_EXECUTE_ADD_RESULT_ACK       := ADD_ACK_E       | ADD_ACK_O;
+    COMMIT_EXECUTE_ALU_RESULT_ACK       := ALU_ACK_E       | ALU_ACK_O;
+    COMMIT_EXECUTE_CSRFPU_RESULT_ACK    := CSRFPU_ACK_E    | CSRFPU_ACK_O;
+    COMMIT_EXECUTE_LSA_RESULT_ACK       := LSA_ACK_E       | LSA_ACK_O;
+    COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK := ALUDIVIDE_ACK_E | ALUDIVIDE_ACK_O;
 
-    always {                                                                                                                    // ACCEPT RESULT AND COMMIT FROM EXECUTE STAGES
-        COMMIT_RD = WENABLE << ADDR;
-
-        if( EXECUTE_FASTBASE_RESULT_READY ) {
-            COMMIT_EXECUTE_FASTBASE_RESULT_ACK = 1;
-        } else {
-            if( EXECUTE_ALU_RESULT_READY ) {
-                COMMIT_EXECUTE_ALU_RESULT_ACK = 1;
-            } else {
-                if( EXECUTE_CSRFPU_RESULT_READY  ) {
-                    COMMIT_EXECUTE_CSRFPU_RESULT_ACK = 1;
-                } else {
-                    if( EXECUTE_LSA_RESULT_READY ) {
-                        COMMIT_EXECUTE_LSA_RESULT_ACK = 1;
-                    } else {
-                        COMMIT_EXECUTE_ALUDIVIDE_RESULT_ACK = EXECUTE_ALUDIVIDE_RESULT_READY;
-                    }
-                }
-            }
-        }
-    }
+    COMMIT_RD := ( WENABLE_E  << { ADDR_E, 1b0 } ) | ( WENABLE_O  << { ADDR_O, 1b1 } );
 }

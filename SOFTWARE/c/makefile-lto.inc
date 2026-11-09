@@ -25,7 +25,7 @@ ifndef INCLUDEEXTRA
 INCLUDEEXTRA=/usr/riscv64-elf/include/
 endif
 
-CPUOPTS=-march=rv64gc_zba_zbb_zbs_zbkb_zbkx_zca_zcb_zcd_zfa_zfh_zifencei_zicsr_zicond_xtheadba_xtheadbb_xtheadbs_xtheadmac_xtheadmemidx_xtheadfmemidx -mabi=lp64d -mshorten-memrefs -mrelax -mno-strict-align
+CPUOPTS=-march=rv64gc_zba_zbb_zbs_zbkb_zbkx_zca_zcb_zcd_zfa_zfh_zifencei_zicsr_zicond_xtheadba_xtheadbb_xtheadbs_xtheadmac_xtheadcondmov -mabi=lp64d -mshorten-memrefs -mrelax -mno-strict-align
 #CPUOPTS=-march=rv64gc_zba_zbb_zbs_zbkb_zbkx_zca_zcb_zcd_zfa_zfh_zicond_zifencei_zicsr_xtheadba_xtheadbb_xtheadbs_xtheadmac_xtheadcondmov_xtheadmemidx_xtheadfmemidx_xtheadmempair -mabi=lp64d -mshorten-memrefs -mrelax -mno-strict-align
 
 CFLAGS=$(CPUOPTS) -O2 -ffunction-sections -fdata-sections -finline -fno-pic -fno-unroll-loops -Wno-stringop-overread -flto -fuse-linker-plugin -nostdlib $(CFLAGSEXTRA)

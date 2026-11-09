@@ -6,7 +6,8 @@
 
 unit cpu_commit_f(
     $$for i=1,3 do
-    simple_dualport_bram_port1 F$i$,                                                                                            // FLOAT REGISTERS WRITE PORT
+    simple_dualport_bram_port1 F$i$_E,                                                                                            // FLOAT REGISTERS WRITE PORT
+    simple_dualport_bram_port1 F$i$_O,                                                                                            // FLOAT REGISTERS WRITE PORT
     $$end
 
     input   uint1               EXECUTE_LSA_RESULT_F_READY,
@@ -21,26 +22,33 @@ unit cpu_commit_f(
 
     output  uint32              COMMIT_F_RD                                                                                       // INSTRUCTION COMMIT IS WRITING TO { FLOAT, RD }
 ) <reginputs> {
-    uint5   ADDR <: EXECUTE_CSRFPU_RESULT_F_READY ? COMMIT_F_CSRFPU_REGISTER : COMMIT_F_LSA_REGISTER;
-    uint1   WENABLE <: ( EXECUTE_CSRFPU_RESULT_F_READY | EXECUTE_LSA_RESULT_F_READY );
-    uint64  WDATA <: EXECUTE_CSRFPU_RESULT_F_READY ? COMMIT_F_CSRFPU_RESULT_F : COMMIT_F_LSA_RESULT_F;
+    uint1   LSA_ACK_E <:: EXECUTE_LSA_RESULT_F_READY & ~COMMIT_F_LSA_REGISTER[0,1];
+    uint1   CSRFPU_ACK_E <:: EXECUTE_CSRFPU_RESULT_F_READY & ~COMMIT_F_CSRFPU_REGISTER[0,1] & ~LSA_ACK_E;
+
+    uint4   ADDR_E <:: LSA_ACK_E ? COMMIT_F_LSA_REGISTER[1,4] : COMMIT_F_CSRFPU_REGISTER[1,4];
+    uint64  WDATA_E <:: LSA_ACK_E ? COMMIT_F_LSA_RESULT_F : COMMIT_F_CSRFPU_RESULT_F;
+    uint1   WENABLE_E <:: LSA_ACK_E | CSRFPU_ACK_E;
+
+    uint1   LSA_ACK_O <:: EXECUTE_LSA_RESULT_F_READY & COMMIT_F_LSA_REGISTER[0,1];
+    uint1   CSRFPU_ACK_O <:: EXECUTE_CSRFPU_RESULT_F_READY & COMMIT_F_CSRFPU_REGISTER[0,1] & ~LSA_ACK_O;
+
+    uint4   ADDR_O <:: LSA_ACK_O ? COMMIT_F_LSA_REGISTER[1,4] : COMMIT_F_CSRFPU_REGISTER[1,4];
+    uint64  WDATA_O <:: LSA_ACK_O ? COMMIT_F_LSA_RESULT_F : COMMIT_F_CSRFPU_RESULT_F;
+    uint1   WENABLE_O <:: LSA_ACK_O | CSRFPU_ACK_O;
+
 
     $$for i=1,3 do
-    F$i$.addr1 := ADDR;
-    F$i$.wenable1 := WENABLE;
-    F$i$.wdata1 := WDATA;
+        F$i$_E.addr1 := ADDR_E;
+        F$i$_E.wenable1 := WENABLE_E;
+        F$i$_E.wdata1 := WDATA_E;
+
+        F$i$_O.addr1 := ADDR_O;
+        F$i$_O.wenable1 := WENABLE_O;
+        F$i$_O.wdata1 := WDATA_O;
     $$end
 
-    COMMIT_F_EXECUTE_CSRFPU_RESULT_F_ACK := 0;
-    COMMIT_F_EXECUTE_LSA_RESULT_F_ACK := 0;
+    COMMIT_F_EXECUTE_LSA_RESULT_F_ACK := LSA_ACK_E | LSA_ACK_O;
+    COMMIT_F_EXECUTE_CSRFPU_RESULT_F_ACK := CSRFPU_ACK_E | CSRFPU_ACK_O;
 
-    always {                                                                                                                    // ACCEPT RESULT AND COMMIT FROM EXECUTE STAGES
-        COMMIT_F_RD = WENABLE << ADDR;
-
-        if( EXECUTE_CSRFPU_RESULT_F_READY  ) {
-            COMMIT_F_EXECUTE_CSRFPU_RESULT_F_ACK = 1;
-        } else {
-            COMMIT_F_EXECUTE_LSA_RESULT_F_ACK = EXECUTE_LSA_RESULT_F_READY;
-        }
-    }
+    COMMIT_F_RD :=  ( WENABLE_E  << { ADDR_E, 1b0 } ) | ( WENABLE_O  << { ADDR_O, 1b1 } );
 }
