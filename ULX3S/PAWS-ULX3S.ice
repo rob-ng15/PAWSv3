@@ -148,7 +148,7 @@ $include('../VID_TOP.si')
 
 // MAIN PAWS.si
 $include('../BUS.si')
-$include('../BUS_CPU_MEMORY.si')
+$include('../BUS_CPU_MEMORY_TEST.si')
 $include('../MEMORY.si')
 $include('../PAWS.si')
 

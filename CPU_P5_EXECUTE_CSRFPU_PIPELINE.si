@@ -742,45 +742,44 @@ unit fpucalc_div_execute(
     output  uint5               COMMIT_DESTREG,
 
     input   uint2   RMODE,                                                                                                      // ROUNDING MODE FLAG
-    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG ( to determine START bit )
-input   uint10  BIAS,                                                                                                       // FLOATING POINT BIAS
-input   uint64  F1_X,                                                                                                      // F1 ( repacked in double bitfields )
-input   uint5   F1_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } OF INPUT F1
-input   uint64  F2_X,                                                                                                      // F2 ( repacked in double bitfields )
-input   uint5   F2_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } OF INPUT F2
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint10  BIAS,                                                                                                       // FLOATING POINT BIAS
+    input   uint64  F1_X,                                                                                                       // F1 ( repacked in double bitfields )
+input   uint5   F1_TYPE,                                                                                                    // { ZF INF sNAN qNAN ZERO } OF INPUT F1
+input   uint64  F2_X,                                                                                                       // F2 ( repacked in double bitfields )
+input   uint5   F2_TYPE,                                                                                                    // { ZF INF sNAN qNAN ZERO } OF INPUT F2
 output  uint5   OUT_FPUFLAGS                                                                                                // NEW FPUFLAGS
 ) <reginputs> {
     uint5               STATE = 1;
 
-    donormalexp NORMAL( bitstream <: FPUdivide.fraction);                                                                                  // HANDLE NORMALISATION
     doroundcombine MAKERESULT(                                                                                                  // HANDLE ROUNDING AND COMBINING
     rm <: RMODE, dsh <: dsh, BIAS <: BIAS,
-    sign <: RESULT_SIGN, exponent <: FPUdivide.exponent, bitstream <: NORMAL.normalfraction
+    sign <: RESULT_SIGN, exponent <: FPUdivide.exponent, bitstream <: FPUdivide.fraction[0,53]
     );
 
-    uint7               SB[4] = { 49, 107, 23, -1 };                                                                            // DETERMINE STARTING BIT FOR DIVISION
+    uint6               SB[4] = { 24, 53, 11, 0 };                                                                              // STARTING BIT FOR SINGLE (24), DOUBLE (53), HALF (11)
     uint1               RESULT_SIGN <:: F1_X[63,1] ^ F2_X[63,1];
     floatdivide FPUdivide(                                                                                                      // FLOAT DIVISION
-    dsh <: dsh,                                                                                                             // DOUBLE/SINGLE/HALF FLAG, BIAS, ROUNDING MODE FLAG
+    dsh <: dsh,                                                                                                             // DOUBLE/SINGLE/HALF FLAG
     a <: F1_X, F1_TYPE <: F1_TYPE,                                                                                          // A OPERAND FOR A/B { ZF INF sNAN qNAN ZERO }
     b <: F2_X, F2_TYPE <: F2_TYPE,                                                                                          // B OPERAND FOR A/B { ZF INF sNAN qNAN ZERO }
     SB <: SB[dsh],                                                                                                          // PASS STARTING BIT
-    OF <: MAKERESULT.OF, UF <: MAKERESULT.UF ,                                                                               // UNDER/OVER FLOW FLAGS
+    OF <: MAKERESULT.OF, UF <: MAKERESULT.UF,                                                                               // UNDER/OVER FLOW FLAGS
     flags :> OUT_FPUFLAGS
     );
 
-    wide_xINF xINF(sign <: RESULT_SIGN ); wide_xZERO xZERO( sign <: RESULT_SIGN );                                                                    // GENERATE SIGNED INFINITY AND ZERO
+    wide_xINF xINF( sign <: RESULT_SIGN ); wide_xZERO xZERO( sign <: RESULT_SIGN );                                             // GENERATE SIGNED INFINITY AND ZERO
     repackage_actual CALCRESULT( dsh <: dsh, repack :> COMMIT_RESULT );                                                         // REPACKAGE CALCULATION RESULT INTO CORRECT BITFIELDS
 
-    FPUdivide.START := STATE[2,1];                                                                                // START    DIVIDE
+    FPUdivide.START := STATE[2,1];                                                                                              // START DIVIDE
 
     COMMIT_RESULT_READY := STATE[4,1];
     COMMIT_DESTREG := DESTREG;
 
-    CALCRESULT.a :=                                                       FPUdivide.special[3,1] ? xINF.value :                                 // RETURN SIGNED INFINITY FOR DIVIDE OR FUSED
-    FPUdivide.special[1,1] ? 64h7FF8000000000000 :                        // RETRURN QNAN FROM DIVIDE, SQRT OR FUSED
-    FPUdivide.special[0,1] ? xZERO.value :                            // RETURN ZERO FROM DIVIDE OR FUSED
-    MAKERESULT.combined;                           // ELSE RETURN CALCULATION RESULT
+    CALCRESULT.a := FPUdivide.special[3,1] ? xINF.value :                                                                       // RETURN SIGNED INFINITY FOR DIVIDE
+    FPUdivide.special[1,1] ? 64h7FF8000000000000 :                                                              // RETURN QNAN FROM DIVIDE
+    FPUdivide.special[0,1] ? xZERO.value :                                                                      // RETURN ZERO FROM DIVIDE
+    MAKERESULT.combined;                                                               // ELSE RETURN CALCULATION RESULT
 
     always {
         onehot( STATE ) {
@@ -807,41 +806,39 @@ unit fpucalc_sqrt_execute(
     output  uint5               COMMIT_DESTREG,
 
     input   uint2   RMODE,                                                                                                      // ROUNDING MODE FLAG
-    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG ( to determine START bit )
-input   uint10  BIAS,                                                                                                       // FLOATING POINT BIAS
-input   uint64  F1_X,                                                                                                      // F1 ( repacked in double bitfields )
-input   uint5   F1_TYPE,                                                                                                   // { ZF INF sNAN qNAN ZERO } OF INPUT F1
+    input   uint2   dsh,                                                                                                        // DOUBLE/SINGLE/HALF FLAG
+    input   uint10  BIAS,                                                                                                       // FLOATING POINT BIAS
+    input   uint64  F1_X,                                                                                                       // F1 ( repacked in double bitfields )
+input   uint5   F1_TYPE,                                                                                                    // { ZF INF sNAN qNAN ZERO } OF INPUT F1
 output  uint5   OUT_FPUFLAGS                                                                                                // NEW FPUFLAGS
 ) <reginputs> {
     uint5               STATE = 1;
 
-    donormalexp NORMAL( bitstream <: FPUsqrt.fraction );                                                                                  // HANDLE NORMALISATION
     doroundcombine MAKERESULT(                                                                                                  // HANDLE ROUNDING AND COMBINING
     rm <: RMODE, dsh <: dsh, BIAS <: BIAS,
-    exponent <: FPUsqrt.exponent, bitstream <: NORMAL.normalfraction
+    exponent <: FPUsqrt.exponent, bitstream <: FPUsqrt.fraction[0,53]
     );
 
-    uint7               SB[4] = { 49, 107, 23, -1 };                                                                            // DETERMINE STARTING BIT FOR DIVISION ( /2 FOR SQUAREROOT )
+    uint6               SB[4] = { 24, 53, 11, 0 };                                                                              // STARTING BIT FOR SINGLE (24), DOUBLE (53), HALF (11)
 
-    // https://projectf.io/posts/square-root-in-verilog/
     floatsqrt FPUsqrt(                                                                                                          // FLOAT SQUARE ROOT
     dsh <: dsh, BIAS <: BIAS,                                                                                               // DOUBLE/SINGLE/HALF FLAG, BIAS
-    a <: F1_X, F1_TYPE <: F1_TYPE,                                                                                       // A OPERAND FOR SQRT(A) AND { ZF INF sNAN qNAN ZERO }
-                                                                                                                                SB <: SB[dsh][1,6],                                                                                                     // PASS STARTING BIT ( HALF OF DIVISION )
-    OF <: MAKERESULT.OF, UF <: MAKERESULT.UF,                                                                                // UNDER/OVER FLOW FLAGS
-    flags :> OUT_FPUFLAGS
+    a <: F1_X, F1_TYPE <: F1_TYPE,                                                                                          // A OPERAND FOR SQRT(A) AND { ZF INF sNAN qNAN ZERO }
+                                                                                                                                SB <: SB[dsh],                                                                                                          // PASS STARTING BIT
+                                                                                                                                OF <: MAKERESULT.OF, UF <: MAKERESULT.UF,                                                                               // UNDER/OVER FLOW FLAGS
+                                                                                                                                flags :> OUT_FPUFLAGS
     );
 
-    wide_xINF xINF(); wide_xZERO xZERO();                                                                    // GENERATE SIGNED INFINITY AND ZERO
+    wide_xINF xINF(); wide_xZERO xZERO();                                                                                       // GENERATE SIGNED INFINITY AND ZERO
     repackage_actual CALCRESULT( dsh <: dsh, repack :> COMMIT_RESULT );                                                         // REPACKAGE CALCULATION RESULT INTO CORRECT BITFIELDS
 
-    FPUsqrt.START := STATE[2,1];                                                                                  //          SQUARE ROOT
+    FPUsqrt.START := STATE[2,1];                                                                                                // START SQUARE ROOT
     COMMIT_RESULT_READY := STATE[4,1];
     COMMIT_DESTREG := DESTREG;
 
-    CALCRESULT.a :=                                                      FPUsqrt.special[1,1] ? 64h7FF8000000000000 :                        // RETRURN QNAN FROM DIVIDE, SQRT OR FUSED
-    FPUsqrt.special[6,1] ? F1_X :                                      // RETURN INPUT FROM SQRT
-    MAKERESULT.combined;                           // ELSE RETURN CALCULATION RESULT
+    CALCRESULT.a := FPUsqrt.special[1,1] ? 64h7FF8000000000000 :                                                                // RETURN QNAN FROM SQRT
+    FPUsqrt.special[6,1] ? F1_X :                                                                               // RETURN INPUT FROM SQRT
+    MAKERESULT.combined;                                                                 // ELSE RETURN CALCULATION RESULT
 
     always {
         onehot( STATE ) {
